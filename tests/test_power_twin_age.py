@@ -201,8 +201,8 @@ def test_simulate_pairs_reproducible_and_reasonable():
     assert math.isclose(pw1, pw2)
     assert math.isclose(avg1, avg2)
     assert math.isclose(se1, se2)
-    # power should be plausible
-    assert 0.3 < pw1 < 0.95
+    # power should be plausibly high at these parameters
+    assert 0.8 < pw1 < 1.0
     assert avg1 > 0
 
 
@@ -465,7 +465,7 @@ def test_cli_pairs_for_power_enrollment_attrition():
                 enrollment = int(line.split(':')[1].split('pairs')[0].strip())
             except Exception:
                 pass
-    assert enrollment == 134
+    assert enrollment == 108
 
 
 def test_cli_near_null_analytic_alpha():

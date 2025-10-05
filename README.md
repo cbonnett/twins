@@ -28,7 +28,8 @@ Both projects expose CLIs, and the top-level `streamlit_app.py` provides a singl
 │   ├── raw_sleep_design.md       # Design notes
 │   └── README.md                 # Sleep module docs
 └── tests/
-    └── test_power_twin_age.py    # Regression suite for bio-age module
+    ├── test_power_twin_age.py    # Regression suite for bio-age module
+    └── test_sleep_study.py       # Protocol-oriented tests for sleep module
 ```
 
 
@@ -67,7 +68,9 @@ Sidebar options:
 
 1. Pick Biological Age or Sleep (ISI).
 2. Configure effect sizes, ICCs, zygosity mix, contamination, attrition, seed, and sims.
-3. Choose a goal (power for fixed N, solve for N, MDE, or bio-age co-primary joint power).
+3. Choose a goal:
+   - Biological Age: power at fixed pairs, pairs for target power, MDE, or co‑primary joint power.
+   - Sleep (ISI): power at fixed N or N for target power.
 
 Results include enrollment inflation, contamination-adjusted effects, and Monte Carlo standard errors when simulation is used.
 
@@ -110,13 +113,17 @@ Each script prints a structured summary (power, required enrollment, contaminati
 
 ## Testing
 
-The biological-age module ships with a regression suite covering validation helpers, analytic solutions, simulation stability, and the CLI wrapper. Run from the repo root:
+Run all tests from the repository root:
 
 ```bash
-PYTHONPATH=. pytest tests/test_power_twin_age.py
+PYTHONPATH=. pytest -q
 ```
 
-`PYTHONPATH=.` ensures `biological_age` is importable when running tests from the root. Add similar coverage for the sleep module as new features land.
+Suites included:
+- `tests/test_power_twin_age.py` — validation helpers, analytic formulas, simulation stability, CLI behavior (biological age).
+- `tests/test_sleep_study.py` — protocol-oriented checks and simulation behavior (sleep/ISI).
+
+`PYTHONPATH=.` ensures the subpackages are importable when running from the root.
 
 
 ## Troubleshooting & Tips

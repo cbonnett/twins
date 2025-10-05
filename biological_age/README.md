@@ -53,7 +53,10 @@ power estimates.
 
 ## Command-Line
 
-`power_twin_age.py` mirrors the UI features for scripting or reproducible reports. Key modes:
+`power_twin_age.py` mirrors the UI features for scripting or reproducible reports. You can run it from this folder as
+`python power_twin_age.py` or from the repository root as `python biological_age/power_twin_age.py`.
+
+Key modes:
 
 - `power` — power for a fixed number of completing pairs.
 - `pairs-for-power` — smallest pair count achieving a target power.

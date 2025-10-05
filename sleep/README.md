@@ -50,13 +50,14 @@ Key sidebar controls:
 5. Monte Carlo settings — number of simulations and RNG seed.
 6. Optional contamination (rate × fraction) and attrition assumptions.
 
-Outputs include estimated power or required total `N`, contamination-adjusted effects, attrition-inflated enrollment counts, and
-Monte Carlo standard errors.
+Outputs include estimated power or required total `N`, contamination‑adjusted effects, attrition‑inflated enrollment counts,
+95% Monte Carlo confidence intervals for power, and Monte Carlo standard errors.
 
 
 ## Command-Line
 
-The CLI mirrors the UI and is convenient for scripted sweeps or reproducible reports.
+The CLI mirrors the UI and is convenient for scripted sweeps or reproducible reports. You can run it from this folder as
+`python power_twin_sleep.py` or from the repository root as `python sleep/power_twin_sleep.py`.
 
 Modes:
 
@@ -106,6 +107,7 @@ Helpful flags:
 ## Outputs
 
 - Estimated power (fixed `N`) or required total sample size (`n-for-power`).
+- 95% Monte Carlo confidence interval for power.
 - Monte Carlo standard error, average estimated treatment effect, and Kish effective sample size.
 - Contamination-adjusted effect magnitude and attrition-inflated enrollment counts when those features are enabled.
 
@@ -133,3 +135,14 @@ Helpful flags:
 - Vary ICCs — e.g., MZ `0.40–0.60`, DZ `0.20–0.35` — to assess robustness to correlation assumptions.
 - Explore different twin mixes; the Kish effective sample size summary highlights the design effect from clustering.
 - Adjust `sd_change` in line with expected baseline-post correlations (smaller SD means higher power at fixed `N`).
+
+
+## Testing
+
+Run from the repository root so subpackages are importable:
+
+```bash
+PYTHONPATH=. pytest tests/test_sleep_study.py -q
+```
+
+The suite focuses on SIESTA‑LLM protocol parameters and verifies simulation behavior, continuity, and robustness.

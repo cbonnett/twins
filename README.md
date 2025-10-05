@@ -97,6 +97,12 @@ Typical invocations:
 ```bash
 python biologicol_age/power_twin_age.py --mode power --n-pairs 700 --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 --icc-mz 0.55 --icc-dz 0.55 --prop-mz 0.5
 python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --sims 2000
+ 
+# Co‑primary biological age example
+python biologicol_age/power_twin_age.py --mode co-primary-power --n-pairs 700 \
+  --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 \
+  --endpoint2 grimage --effect2-years 2.0 --sd2-change 3.0 \
+  --use-simulation --sims 5000 --pair-effect-corr 0.8
 ```
 
 Each script prints a structured summary (power, required enrollment, contamination note, etc.) suitable for reports or downstream tooling.
@@ -115,7 +121,7 @@ PYTHONPATH=. pytest tests/test_power_twin_age.py
 
 ## Troubleshooting & Tips
 
-- SciPy/statsmodels optionality — analytic bio-age paths use NumPy/SciPy (with safe fallbacks); the sleep simulation uses cluster-robust OLS by default and falls back to GLS if MixedLM is unavailable.
+- SciPy/statsmodels optionality — analytic bio‑age paths use NumPy/SciPy (with safe fallbacks). The sleep module uses cluster‑robust OLS by default; MixedLM is optional and, if it fails to converge, the CLI falls back to cluster‑robust OLS.
 - Monte Carlo precision — increase `--sims` (CLI) or the slider (UI) for publication-quality precision. MC SE ≈ `sqrt(p·(1−p)/sims)`.
 - Seeds — set a seed to reproduce simulation runs. Vary to gauge Monte Carlo variability.
 - Attrition — power is for completing participants/pairs; enrollment inflates by `1/(1−attrition)`.

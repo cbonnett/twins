@@ -87,7 +87,7 @@ python power_twin_sleep.py --mode power --n-total 160 --effect-points 5 --sd-cha
 
 Helpful flags:
 
-- `--analysis {cluster_robust,mixedlm}` — choose estimator; MixedLM automatically reverts to GLS if the model fails to converge.
+- `--analysis {cluster_robust,mixedlm}` — choose estimator. MixedLM is optional and, if it fails to converge, the CLI falls back to cluster‑robust OLS.
 - `--seed` — reproducible Monte Carlo draws.
 - `--contamination-rate` / `--contamination-effect` — apply effect attenuation (`effect_obs = effect × (1 − rate × fraction)`).
 - `--attrition-rate` — compute inflated enrollment counts (power is always on completing participants).
@@ -122,7 +122,7 @@ Helpful flags:
 ## Reproducibility & Troubleshooting
 
 - Activate your virtual environment before installing requirements.
-- If `statsmodels` or MixedLM is missing, stick with `--analysis cluster_robust` (default). The CLI automatically falls back to a GLS solution when MixedLM fails to converge.
+- If `statsmodels` or MixedLM is missing, stick with `--analysis cluster_robust` (default). If MixedLM fails to converge, the CLI falls back to cluster‑robust OLS.
 - Install Streamlit separately if needed: `pip install streamlit` then run from the repo root: `streamlit run streamlit_app.py`.
 - Change the Streamlit port if 8501 is busy: `streamlit run streamlit_app.py --server.port 8502`.
 - Set `--seed` (CLI) or the UI seed slider to make Monte Carlo estimates reproducible. Increase `--sims` for final numbers.

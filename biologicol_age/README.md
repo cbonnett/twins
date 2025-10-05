@@ -81,6 +81,11 @@ python power_twin_age.py --mode mde --n-pairs 700 --endpoint dunedinpace --sd-ch
 python power_twin_age.py --mode co-primary-power --n-pairs 700 --endpoint dunedinpace \
     --effect-pct 3 --sd-change 0.10 --endpoint2 grimage --effect2-years 2.0 \
     --sd2-change 3.0 --use-simulation --sims 5000
+
+# Power curve CSV (pairs 200..1000)
+python power_twin_age.py --mode curve --endpoint dunedinpace --effect-pct 3 \
+    --sd-change 0.10 --icc-mz 0.55 --icc-dz 0.55 --prop-mz 0.5 \
+    --curve-start 200 --curve-stop 1000 --curve-step 50 > dpace_curve.csv
 ```
 
 Helpful flags:
@@ -90,6 +95,7 @@ Helpful flags:
 - `--seed` — reproducible random draws.
 - `--contamination-rate`, `--contamination-effect` — model effect attenuation.
 - `--attrition-rate` — compute inflated enrollment alongside completing pairs.
+- `--d-std` — specify standardized paired d instead of absolute magnitude (requires SD(change) and ICC to be provided).
 
 
 ## Parameter Guidance (Protocol-Aligned)
@@ -113,6 +119,7 @@ Helpful flags:
 - Effective ICC, SD of within-pair difference, and paired Cohen’s `d` summaries.
 - Enrollment inflation when attrition is supplied.
 - Co-primary results report marginal and joint power along with per-endpoint alpha.
+  Printed summaries assume the biological age primary endpoint at Week 24.
 
 
 ## Worked Examples

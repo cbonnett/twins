@@ -168,7 +168,6 @@ def test_observed_effect_matches_apply_contamination():
 
 # ---------- Paired p-value computation ----------
 
-@pytest.mark.xfail(reason="Degenerate zero-variance differences return p=0.0; expected 1.0")
 def test_compute_paired_pval_degenerate_all_zero_should_not_be_significant():
     d = np.zeros(10)
     p = pta._compute_paired_pval(d)
@@ -431,9 +430,9 @@ def test_cli_contamination_note_and_mde_outputs():
         "--contamination-rate", "0.30", "--contamination-effect", "0.50"
     ])
     assert ok_mde
-    has_mde = any('MDE (absolute, beneficial):' in ln for ln in out_mde.splitlines())
-    has_mde_nc = any('MDE without contamination:' in ln for ln in out_mde.splitlines())
-    assert has_mde and has_mde_nc
+    has_mde_obs = any('Observed MDE (on test scale):' in ln for ln in out_mde.splitlines())
+    has_mde_true = any('Underlying true effect required (given contamination):' in ln for ln in out_mde.splitlines())
+    assert has_mde_obs and has_mde_true
 
 
 def test_cli_validation_errors():
@@ -490,3 +489,119 @@ def test_cli_nan_hotspot_guard_reasonable_n():
     n = _extract_sample_size(out)
     assert n > 0 and n < 1000
 
+
+# ---------- Additional unit tests (expanded coverage) ----------
+
+def test_validate_probability_toggles():
+    pta.validate_probability(0.0, "p", allow_zero=True)
+    with pytest.raises(ValueError):
+        pta.validate_probability(0.0, "p", allow_zero=False)
+    pta.validate_probability(1.0, "p", allow_one=True)
+    with pytest.raises(ValueError):
+        pta.validate_probability(1.0, "p", allow_one=False)
+
+
+def test_sd_change_from_pre_post_invalid_rho_raises():
+    with pytest.raises(ValueError):
+        pta.sd_change_from_pre_post(1.0, 1.0, 1.1)
+    with pytest.raises(ValueError):
+        pta.sd_change_from_pre_post(1.0, 1.0, -1.1)
+
+
+def test_two_sided_power_normal_monotonic_in_abs_lambda():
+    alpha = 0.05
+    pw0 = pta._two_sided_power_normal(0.0, alpha)
+    pw1 = pta._two_sided_power_normal(1.0, alpha)
+    pw2 = pta._two_sided_power_normal(2.0, alpha)
+    # At lambda=0, power ~= alpha
+    assert abs(pw0 - alpha) < 1e-12
+    assert pw0 < pw1 < pw2
+
+
+def test_analytic_power_paired_normal_fallback_large_lambda():
+    # Choose parameters such that sqrt(n)*d > 20 triggers normal approximation path
+    n = 100
+    sd_change = 1.0
+    icc = 0.0
+    effect_abs = 3.0  # d = 3/sqrt(2) ~ 2.12; lambda ~ 21.2
+    pw = pta.analytic_power_paired(n, effect_abs, sd_change, icc, 0.05)
+    assert 0.99 < pw <= 1.0
+
+
+def test_analytic_mde_monotonic_in_n_and_alpha():
+    sd_change = 0.10
+    icc = 0.55
+    # MDE decreases as n increases
+    mde_small_n = pta.analytic_mde(100, 0.80, sd_change, icc, 0.05)
+    mde_large_n = pta.analytic_mde(500, 0.80, sd_change, icc, 0.05)
+    assert mde_large_n < mde_small_n
+    # MDE decreases as alpha increases (less stringent)
+    mde_alpha_strict = pta.analytic_mde(300, 0.80, sd_change, icc, 0.01)
+    mde_alpha_loose = pta.analytic_mde(300, 0.80, sd_change, icc, 0.10)
+    assert mde_alpha_loose < mde_alpha_strict
+
+
+def test_agetwinspec_validation_errors():
+    with pytest.raises(ValueError):
+        pta.AgeTwinSpec(n_pairs=0, effect_abs=0.1, sd_change=1.0)
+    with pytest.raises(ValueError):
+        pta.AgeTwinSpec(n_pairs=2, effect_abs=-0.1, sd_change=1.0)
+    with pytest.raises(ValueError):
+        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=0.0)
+    with pytest.raises(ValueError):
+        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=1.0, prop_mz=1.1)
+    with pytest.raises(ValueError):
+        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=1.0, icc_mz=1.0)
+
+
+def test_effective_icc_clamps_prop_mz_beyond_bounds():
+    spec = pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=1.0, prop_mz=0.5, icc_mz=0.8, icc_dz=0.2)
+    spec.prop_mz = 1.5
+    assert math.isclose(spec.effective_icc(), 0.8, rel_tol=1e-12)
+    spec.prop_mz = -0.5
+    assert math.isclose(spec.effective_icc(), 0.2, rel_tol=1e-12)
+
+
+def test_compute_paired_pval_degenerate_all_constant_nonzero_is_significant():
+    d = np.full(10, 0.5)
+    p = pta._compute_paired_pval(d)
+    assert math.isclose(p, 0.0)
+
+
+def test_simulate_coprimary_joint_power_monotonic_wrt_corr():
+    spec1 = pta.AgeTwinSpec(n_pairs=160, effect_abs=0.03, sd_change=0.10, prop_mz=0.5, icc_mz=0.55, icc_dz=0.55, seed=200)
+    spec2 = pta.AgeTwinSpec(n_pairs=160, effect_abs=1.0, sd_change=3.0, prop_mz=0.5, icc_mz=0.55, icc_dz=0.55, seed=201)
+    jp_low, p1_low, p2_low = pta._simulate_co_primary(spec1, spec2, sims=1200, alpha=0.025, pair_effect_corr=0.0)
+    jp_high, p1_high, p2_high = pta._simulate_co_primary(spec1, spec2, sims=1200, alpha=0.025, pair_effect_corr=0.9)
+    # Joint power should not decrease when correlation increases (tolerance for MC noise)
+    assert jp_high + 0.02 >= jp_low
+    # Joint power is bounded by marginals
+    assert jp_low <= min(p1_low, p2_low)
+    assert jp_high <= min(p1_high, p2_high)
+
+
+# ---------- Additional CLI error-case tests ----------
+
+def test_cli_missing_endpoint2_in_coprimary_errors():
+    ok, _ = _run_power_cli([
+        "--mode", "co-primary-power", "--n-pairs", "120",
+        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--sd-change", "0.10",
+        "--alpha", "0.025", "--use-simulation", "--sims", "200"
+    ])
+    assert not ok
+
+
+def test_cli_missing_effect_errors_for_power():
+    ok, _ = _run_power_cli([
+        "--mode", "power", "--n-pairs", "100",
+        "--endpoint", "custom", "--sd-change", "0.10", "--alpha", "0.05"
+    ])
+    assert not ok
+
+
+def test_cli_missing_sd_change_errors():
+    ok, _ = _run_power_cli([
+        "--mode", "power", "--n-pairs", "100",
+        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--alpha", "0.05"
+    ])
+    assert not ok

@@ -11,7 +11,8 @@ This app is a thin UI that calls into the existing analysis modules:
 from __future__ import annotations
 
 import math
-from typing import Optional
+import json
+from typing import Dict, Any
 
 import streamlit as st
 
@@ -19,7 +20,6 @@ import streamlit as st
 from biologicol_age.power_twin_age import (
     AgeTwinSpec,
     sd_change_from_pre_post as age_sd_change_from_pre_post,
-    sd_diff_from_sd_change_icc,
     analytic_power_paired,
     analytic_pairs_for_power,
     analytic_mde,
@@ -40,143 +40,174 @@ st.set_page_config(page_title="Twin Power — Unified", layout="wide")
 st.title("Twin-Aware Power — Unified App")
 st.caption("Run power and sample-size calculations for Biological Age and Sleep studies in one place.")
 
+
+def _power_ci(p: float, se: float) -> tuple[float, float]:
+    # If se is zero/None (e.g., power is exactly 0 or 1), return a degenerate interval at p
+    if se is None or se <= 0:
+        return (max(0.0, min(1.0, float(p))), max(0.0, min(1.0, float(p))))
+    lo = max(0.0, p - 1.96 * se)
+    hi = min(1.0, p + 1.96 * se)
+    return (lo, hi)
+
+
+def _approx_se(p: float, sims: int) -> float:
+    sims = max(1, int(sims))
+    v = max(p * (1.0 - p), 1e-12)
+    return math.sqrt(v / sims)
+
+
+def _download_button(label: str, payload: Dict[str, Any], key: str) -> None:
+    st.download_button(
+        label=label,
+        data=json.dumps(payload, indent=2),
+        file_name=f"{key}.json",
+        mime="application/json",
+        key=key,
+    )
+
 # Global help text blocks to show as hover tooltips (help=...) and inline guidance
 HELP_BIO = {
     "alpha": (
-        "Two-sided significance level (Type I error rate). For two co‑primary endpoints, use 0.025 per endpoint (Bonferroni). "
-        "Lower alpha reduces false positives but requires larger samples."
+        "Two‑sided Type I error rate for hypothesis tests. Use 0.05 for a single primary endpoint; for two co‑primary endpoints a simple Bonferroni split uses 0.025 per endpoint. Lower alpha reduces false positives but increases the sample size required for the same power. If you have a strong, pre‑registered directional hypothesis, a one‑sided test could be justified, but most regulatory and peer‑review contexts expect two‑sided tests to guard against unanticipated harm. For multiple outcomes, consider Holm or Hochberg procedures as alternatives to Bonferroni; they can be less conservative while still controlling family‑wise error."
     ),
     "use_sim": (
-        "Monte Carlo simulation estimates power by simulating many trials under your assumptions (ICCs, MZ/DZ mix). "
-        "Analytic mode (paired t) is fast and interpretable but assumes ideal conditions; simulation is recommended for final numbers, edge cases, and co‑primary analysis."
+        "Choose Monte Carlo simulation to reflect your exact design (MZ/DZ mix, ICCs, contamination, attrition) and to handle co‑primary endpoints. Analytic mode (paired t‑test) is very fast and transparent but relies on stronger assumptions (e.g., normality, homogeneous variance, no contamination). Simulation naturally captures finite‑sample behavior, incorporates dilution from contamination, and estimates joint power across endpoints. Use analytic mode for rapid what‑ifs and intuition building; rely on simulation for final planning, sensitivity analyses, and when assumptions are questionable."
     ),
     "sims": (
-        "Number of Monte Carlo iterations. Larger values reduce Monte Carlo noise but take longer. "
-        "Monte Carlo SE ≈ sqrt(p·(1−p)/sims). Example: p=0.85, sims=3000 → SE≈0.0067 (≈±1.3% at 95% CI)."
+        "How many trial replicates to simulate for power. Larger values reduce Monte Carlo noise at the cost of time. Rough precision: SE(power) ≈ sqrt(p·(1−p)/sims). Example: p=0.85 with 3000 sims → SE≈0.0067 (≈±1.3% at 95% CI). As a rule of thumb: 1000 sims for quick checks, 3000–5000 for drafts, 10k+ for publication or critical decisions. When comparing scenarios, keep ‘sims’ and the random seed fixed so differences reflect inputs, not randomness."
     ),
     "seed": (
-        "Random seed for reproducibility of simulation results. Changing the seed produces slightly different estimates due to Monte Carlo noise."
+        "Random seed controlling the pseudo‑random draws so results are reproducible. Changing the seed changes the Monte Carlo realization but not the underlying expected power. Log the seed in your protocol or report to allow exact replication of your power numbers; use a different seed only when deliberately re‑sampling to verify stability."
     ),
     "endpoint": (
-        "Outcome scale. DunedinPACE is unitless pace‑of‑aging (beneficial = slower pace). GrimAge is years (beneficial = fewer years). Custom is any absolute change scale you provide."
+        "Outcome scale to analyze. DunedinPACE is a unitless pace‑of‑aging index (beneficial = slower pace). GrimAge is expressed in years (beneficial = fewer years). ‘Custom’ lets you supply any absolute change scale. Choose the option that matches your scientific endpoint, reporting units, and how SD(change) is measured. Be consistent: the ‘effect’ and ‘SD of change’ must be on the same scale. If you also track standardized effects (Cohen’s d), you can convert between absolute and standardized via the paired‑difference SD shown below."
     ),
     "eff_abs_dpace": (
-        "Absolute slowing for DunedinPACE. Example: 0.03 = 3% slower pace in treatment vs control (beneficial)."
+        "Absolute slowing on DunedinPACE (beneficial). For example, 0.03 means the treated twin slows aging by 3% relative to their co‑twin. Larger values increase power; use prior studies, meta‑analyses, or pilot estimates to anchor plausibility. Consider duration: shorter interventions tend to yield smaller absolute slowing. If you have a standardized target (paired d), multiply by SD(pair‑diff) to back out the absolute effect here."
     ),
     "eff_abs_grimage": (
-        "Absolute years reduction for GrimAge. Example: 2.0 = treatment is 2 years younger than control at follow‑up."
+        "Absolute reduction in GrimAge in years (beneficial). For example, 2.0 means the treated twin is 2 biological‑years younger at follow‑up. Anchor choices to clinically meaningful thresholds and the expected timescale of change—large year‑level shifts usually require longer follow‑up. When contamination is non‑zero, remember that the observed effect is diluted relative to the true biological effect."
     ),
     "eff_abs_custom": (
-        "Absolute beneficial effect on your change scale. Internally, treated change is reduced by this amount so paired differences are negative; magnitudes are reported positive for clarity."
+        "Absolute beneficial effect on your chosen change scale. Internally the treated change is reduced by this amount, so paired differences are negative; we report magnitudes positively for clarity. Set to 0 to sanity‑check that power ≈ alpha. If you have a standardized effect size (d), convert by multiplying d × SD(pair‑diff) where SD(pair‑diff)=sqrt(2·(1−ICC_eff))·SD(change)."
     ),
     "sd_change": (
-        "SD of individual change (post − pre). If you will adjust for baseline (ANCOVA), you can derive a smaller SD(change) from SD(pre), SD(post), and corr(pre,post) using the helper expander."
+        "Standard deviation of individual change (post − pre) on the chosen scale. Smaller variability increases power. If you plan baseline adjustment (ANCOVA), derive a reduced SD(change) using SD(pre), SD(post), and their correlation in the helper—this often yields meaningfully smaller variance than using raw change. SD(change) is one of the most influential inputs; where uncertain, run a sensitivity grid (e.g., ±20%) to assess robustness of N and MDE."
     ),
     "icc_mz": (
-        "Within‑pair ICC for change in MZ twins. Higher ICC reduces SD of the paired difference and increases power at fixed N."
+        "Within‑pair intraclass correlation (ICC) for MZ twins on the change measure. Higher ICC tightens paired differences: Var(pair‑diff)=2·(1−ICC)·Var(change), so power rises with ICC at fixed N. Typical change‑score ICCs may range from ~0.3 to 0.8 depending on measurement reliability and shared environment. Over‑ or under‑estimating ICC directly shifts precision; prefer estimates from cohorts measured with the same assay and follow‑up interval."
     ),
     "icc_dz": (
-        "Within‑pair ICC for change in DZ twins. The effective ICC is a variance‑weighted blend of MZ/DZ per your MZ proportion."
+        "Within‑pair ICC for DZ twins on the change measure. Because DZ pairs are less correlated than MZ, lower ICC typically inflates the paired‑difference variance. The overall effective ICC blends MZ and DZ per your mix. If DZ ICC is close to MZ ICC, the incremental precision from MZ over DZ is smaller; if much lower, prioritizing MZ pairs (when feasible) can markedly reduce required N."
     ),
     "prop_mz": (
-        "Proportion of twin pairs that are MZ. Effective ICC ≈ 1 − [prop_mz·(1−ICC_MZ) + (1−prop_mz)·(1−ICC_DZ)]."
+        "Proportion of twin pairs who are MZ. This controls the effective ICC: ICC_eff ≈ prop_mz·ICC_MZ + (1−prop_mz)·ICC_DZ (on the correlation scale). More MZ pairs generally increase precision at fixed N. If your recruitment mix is uncertain, run sensitivity (e.g., prop_mz in {0.3, 0.5, 0.7}) and plan to monitor the accrued mix to update projections during enrollment."
     ),
     "contam_rate": (
-        "Proportion of controls expected to adopt intervention‑like behaviors (0–1)."
+        "Share of control twins expected to adopt intervention‑like behaviors (0–1). This ‘contamination’ dilutes the observed treatment‑control contrast. With contamination fraction f, the observed effect becomes effect_true × (1 − rate × f). Use this for pragmatic trials where spillover, cross‑talk between co‑twins, or self‑initiated behavior change is likely. If contamination is differential (e.g., more common in one zygosity), simulate a range; even modest rates can materially shrink power."
     ),
     "contam_frac": (
-        "Fraction of the full intervention effect that contaminated controls receive (0–1). Observed effect = effect × (1 − rate × fraction)."
+        "Fraction (0–1) of the full intervention effect that contaminated controls experience. A value of 0.3 with a 20% contamination rate reduces the observed effect by 6% (0.2×0.3). If contaminated controls approach full adherence (fraction near 1), intent‑to‑treat effects will be heavily diluted. If your analysis is per‑protocol or uses instrumental variables, the estimand changes; here we assume ITT, so set realistic values and document sensitivity runs."
     ),
     "attrition": (
-        "Expected dropout rate (0–1). Reported power and required pairs refer to completing pairs; enrollment is inflated by 1/(1−attrition)."
+        "Proportion of randomized pairs expected to be missing from the primary analysis. Power and N are defined for completing pairs; plan enrollment as required_pairs/(1−attrition). In within‑pair analyses, a pair ‘completes’ only if both twins provide follow‑up; losing one twin removes the pair. Anticipate higher attrition for longer follow‑up, invasive sampling, or burdensome visits; include operational buffers."
     ),
     "goal": (
-        "Choose your task: (1) Estimate power for a fixed number of completing pairs; (2) Find the minimum pairs to reach a target power; (3) Compute the minimal detectable effect (MDE); (4) Estimate co‑primary joint power."
+        "Choose the design task: (i) estimate power at a fixed number of completing pairs; (ii) solve for the minimum pairs needed to achieve a target power; (iii) compute the minimal detectable effect (MDE) at a given N; or (iv) estimate joint power when both co‑primary endpoints must be significant. Use MDE when effect size is uncertain to understand what magnitudes your design can credibly detect."
     ),
     "n_pairs": (
-        "Number of completing twin pairs contributing to primary analysis. Enrollment must be larger if attrition > 0."
+        "Number of completing twin pairs contributing data to the analysis. Enrollment should be inflated for attrition so that the expected number of completers matches this value. If you expect heterogeneous ICCs or measurement variance across sites, consider simulating with a slightly larger N than the analytic minimum to protect against misspecification."
     ),
     "target_power": (
-        "Desired statistical power (e.g., 0.80 or 0.90). Higher targets require more pairs."
+        "Desired probability of detecting the specified effect (e.g., 0.80 or 0.90). Higher targets are more conservative but require more pairs. Many funders expect ≥0.80; choose ≥0.90 when stakes are high or assumptions are uncertain. Remember that contamination, lower ICC, or larger SD(change) all reduce power at fixed N."
     ),
     "n_min": (
-        "Lower bound of the search range for pairs‑for‑power. Use a small value to include the underpowered region."
+        "Lower bound for the search over completing pairs when solving for sample size. Set low enough to include the underpowered region so the binary search can bracket the solution. If unsure, start near 20–50 pairs to ensure the algorithm explores low‑power regimes."
     ),
     "n_max": (
-        "Upper bound of the search range for pairs‑for‑power. Ensure it’s high enough to include the adequately powered region."
+        "Upper bound for the search over completing pairs. Set high enough that the design is clearly well‑powered somewhere in the range. If the result hits this bound, increase it and re‑run—this indicates the initial bracket was too low for your assumptions."
     ),
     "pair_corr": (
-        "Correlation (0–1) between the pair random effects across endpoints (co‑primary). Higher correlation increases the chance both endpoints are significant together."
+        "Correlation (0–1) between the latent pair effects across the two endpoints for co‑primary analysis. Higher correlation increases the probability that both endpoints are significant together at the same N. At ρ≈0 the joint power ≈ product of marginal powers; at ρ→1 the joint success rate rises toward the weaker of the two marginal powers. Use pilot or literature to set ρ and report sensitivity (e.g., 0.5, 0.8, 0.95)."
     ),
     "n_pairs_co": (
-        "Number of completing pairs for the co‑primary simulation."
+        "Number of completing pairs used when estimating joint power for two endpoints. This plays the same role as ‘n_pairs’ but in a bivariate setting; power depends on both marginal effects/variances and their correlation structure."
     ),
     "sims_co": (
-        "Number of Monte Carlo iterations used for co‑primary joint power. Increase for tighter precision."
+        "Number of Monte Carlo iterations for estimating co‑primary joint power. Because joint probabilities are often lower than marginal ones, use more iterations (e.g., ≥5000) for stable estimates. Keep the seed fixed when comparing scenarios so changes reflect inputs rather than Monte Carlo noise."
     ),
     "sd_prepost": (
-        "Helper to compute SD(change) from SD(pre), SD(post), and their correlation ρ using Var(change)=Var(pre)+Var(post)−2ρ·sd_pre·sd_post."
+        "Helper to derive SD(change) from SD(pre), SD(post), and their correlation ρ using Var(change)=Var(pre)+Var(post)−2ρ·sd_pre·sd_post. Positive correlations (common in longitudinal measures) reduce Var(change); negative correlations increase it. When ρ is uncertain, try 0.3–0.7; report which value you assumed to keep calculations transparent and reproducible."
     ),
 }
 
 HELP_SLEEP = {
     "alpha": (
-        "Two-sided significance level (Type I error rate). If you later adopt multiple primaries, adjust alpha accordingly (e.g., Bonferroni)."
+        "Two‑sided Type I error rate. 0.05 is standard for a single primary endpoint; if you plan multiple primary outcomes, adjust alpha (e.g., Bonferroni or Holm) to control the family‑wise error rate. Lower alpha protects against false positives but increases required N. Use one‑sided tests only with a pre‑specified directional hypothesis and clear justification; two‑sided tests remain the norm to guard against unexpected harm."
     ),
     "sims": (
-        "Number of Monte Carlo iterations. Monte Carlo SE ≈ sqrt(p·(1−p)/sims). Increase for final estimates."
+        "Number of Monte Carlo iterations used to estimate power. Larger values reduce Monte Carlo error but take longer. Approximate precision: SE(power) ≈ sqrt(p·(1−p)/sims). Use ~1000 for quick iteration, 3000–5000 for robust planning, and 10k+ when presenting final numbers. Keep the seed fixed to isolate the effect of input changes across scenarios."
     ),
     "seed": (
-        "Random seed for reproducibility of simulated results."
+        "Random seed for reproducibility. Keeps simulated power results stable across runs for the same inputs. Record the seed alongside assumptions in analysis plans to facilitate independent replication and auditing of your power calculations."
     ),
     "effect_points": (
-        "Effect size in ISI points: additional reduction (more negative change) in treatment vs control by Week 8. MCID is ~6 points."
+        "Treatment–control difference in ISI change at Week 8, in points (beneficial = larger additional reduction for treatment). A commonly cited minimal clinically important difference (MCID) is ≈6 points—use this as a reference when selecting a plausible effect. Align your assumed effect with intervention intensity, adherence expectations, and follow‑up length; shorter or lower‑touch interventions often yield smaller point changes."
     ),
     "sd_change": (
-        "SD of the individual ISI change (Week 8 − baseline). If using ANCOVA on post‑ISI, derive a smaller SD(change) from SD(pre), SD(post), and corr using the helper."
+        "Standard deviation of individual ISI change (Week 8 − baseline). Lower variability improves power. If analyzing post‑ISI with baseline as a covariate (ANCOVA), use the helper to convert SD(pre), SD(post), and their correlation into an implied SD(change), which is often smaller. When uncertain, perform sensitivity analysis (e.g., ±1–2 points) as SD assumptions can dominate sample size requirements."
     ),
     "prop_twins": (
-        "Proportion of the full sample who are twins (pairs). Remaining participants are singletons. Affects clustering."
+        "Proportion of participants who are twins (i.e., enrolled as members of a pair). The remainder are singletons. More twins increase within‑cluster correlation and affect precision; the analysis uses cluster‑robust SEs to account for this. If your twin fraction is uncertain, explore a range (e.g., 0.5–0.9) and plan recruitment to achieve the target mix."
     ),
     "prop_mz": (
-        "Among twins, fraction who are MZ. Remaining are DZ. Influences effective correlation and precision."
+        "Among the twin participants, the fraction who are MZ (the rest are DZ). This shapes the effective clustering because MZ pairs typically have higher ICC than DZ pairs, influencing the standard errors. If MZ and DZ proportions drift during enrollment, update projections—precision at fixed N may change if the realized mix differs from planning assumptions."
     ),
     "icc_mz": (
-        "Within‑pair ICC for MZ twins on change."
+        "Within‑pair ICC among MZ twins for ISI change. Higher ICC means twins’ outcomes are more similar, increasing effective clustering and influencing the precision of treatment effects. Use prior ISI datasets or pilot twin data to set this; ICCs for change often sit below those for raw scores due to regression to the mean and measurement error."
     ),
     "icc_dz": (
-        "Within‑pair ICC for DZ twins on change."
+        "Within‑pair ICC among DZ twins for ISI change. Typically lower than MZ; together with the MZ fraction this determines the effective clustering in the mixed twin/singleton sample. Sensitivity to ICC assumptions can be high near the design boundary; if feasible, plan a short pilot to estimate ICCs and refine the main trial’s N."
     ),
     "contamination_rate": (
-        "Proportion of controls expected to adopt intervention‑like behaviors (0–1)."
+        "Proportion of control participants likely to adopt intervention‑like behaviors (0–1). Contamination reduces the observed treatment–control contrast. With fraction f, the observed effect becomes effect_true × (1 − rate × f). Use >0 when pragmatic conditions encourage self‑help or information spillover (including between co‑twins). If contamination is anticipated to vary by site or cohort, run scenario analyses to bound possible losses in power."
     ),
     "contamination_effect": (
-        "Fraction of full effect those contaminated controls receive (0–1). Observed effect = effect × (1 − rate × fraction)."
+        "Fraction (0–1) of the full treatment effect that contaminated controls experience. For example, a 25% contamination rate and 0.5 fraction shrinks the observed effect by 12.5%. If controls receive nearly the full intervention effect (fraction→1), intent‑to‑treat effects will be heavily diluted. Consider registering sensitivity analyses at several fraction levels to transparently communicate robustness of power to contamination."
     ),
     "attrition": (
-        "Expected dropout rate (0–1). Enrollment is inflated by 1/(1−attrition); power refers to completing individuals."
+        "Proportion of randomized individuals expected to be missing from the primary analysis. Power and N refer to completers; inflate planned enrollment by 1/(1−attrition) so enough participants finish. Attrition may not be random; while the simulation assumes missing completely at random for planning, operational strategies (reminders, flexible scheduling) should target at‑risk subgroups to maintain power."
     ),
     "mode": (
-        "Choose to estimate power for a fixed total N (individuals) or search for the minimum N achieving a target power."
+        "Pick whether to estimate power for a fixed total N (what is my power if I can enroll N?) or to search for the minimum N that achieves a target power (how many people do I need?). Use the search mode when negotiating budgets or timelines; use fixed‑N mode when N is constrained by feasibility."
     ),
     "n_total": (
-        "Total number of randomized individuals contributing to the primary analysis."
+        "Total number of randomized individuals contributing to the primary analysis (twins and singletons combined). Adjust planned enrollment upward if attrition is non‑zero. Note that pairs count as two individuals; this app’s analysis accounts for clustering via cluster‑robust standard errors or mixed models in the underlying engine."
     ),
     "target_power": (
-        "Desired statistical power (e.g., 0.80–0.95)."
+        "Desired probability of detecting your specified effect (e.g., 0.80–0.95). Higher targets are more conservative and require larger N. Consider 0.90+ if assumptions (ICC, SD, contamination) are uncertain or if the trial is costly to repeat."
     ),
     "n_min": (
-        "Lower bound of the search range for N."
+        "Lower bound for the sample‑size search. Set low enough that designs in this region are clearly underpowered; this helps the search bracket the solution and avoid boundary effects. If unsure, start at 100 and adjust based on returned results."
     ),
     "n_max": (
-        "Upper bound of the search range for N."
+        "Upper bound for the sample‑size search. Set high enough that adequate power is reachable within the range. If the algorithm returns the upper bound, increase it and re‑run—your initial bracket was too low for the assumed effect and variability."
     ),
     "sd_prepost": (
-        "Helper to compute SD(change) from SD(pre), SD(post), and their correlation ρ using the standard variance identity."
+        "Helper to derive SD(change) from SD(pre), SD(post), and their correlation ρ using Var(change)=Var(pre)+Var(post)−2ρ·sd_pre·sd_post. Positive correlations reduce change variance; negative correlations increase it. If you only know SD(pre) and an R² from baseline regression, you can approximate ρ ≈ sqrt(R²) under equal‑variance assumptions."
     ),
 }
 
-study = st.sidebar.radio("Study", ["Biological Age", "Sleep (ISI)"], help="Select which study framework to use in the main panel.")
+# Basic URL state for convenience (new API)
+qp = st.query_params
+_study_q = (qp.get("study", "bio") or "bio")
+study_index = 0 if _study_q.lower() in ("bio", "biological", "biological age") else 1
+study = st.sidebar.radio(
+    "Study",
+    ["Biological Age", "Sleep (ISI)"],
+    index=study_index,
+    help="Select which study framework to use in the main panel.",
+)
 
 
 def panel_bioage():
@@ -184,8 +215,11 @@ def panel_bioage():
     c1, c2, c3 = st.columns(3)
     with c1:
         alpha = st.number_input("Alpha (two-sided)", 0.0001, 0.2, 0.05, 0.005, format="%.3f", help=HELP_BIO["alpha"]) 
+    # Allow URL to set default for use_sim on first load
+    default_use_sim = str(qp.get("use_sim", "1")).lower() in ("1", "true")
     with c2:
-        use_sim = st.checkbox("Use simulation", value=False, help=HELP_BIO["use_sim"]) 
+        # Default to simulation mode checked on first load for realism and joint-endpoint support
+        use_sim = st.checkbox("Use simulation", value=default_use_sim, help=HELP_BIO["use_sim"]) 
     with c3:
         sims = st.number_input("Simulations", 200, 20000, 2000, 200, help=HELP_BIO["sims"]) 
     seed = st.number_input("Random seed", 0, 10**9, 12345, 1, help=HELP_BIO["seed"]) 
@@ -196,7 +230,7 @@ def panel_bioage():
         eff_abs = st.number_input("Absolute slowing (e.g., 0.03 for 3%)", 0.0, 1.0, 0.03, 0.005, format="%.3f", help=HELP_BIO["eff_abs_dpace"]) 
         sd_change = st.number_input("SD of change", 1e-6, 1.0, 0.10, 0.01, format="%.3f", help=HELP_BIO["sd_change"]) 
     elif endpoint == "grimage":
-        eff_abs = st.number_input("Years reduction (absolute)", 0.0, 20.0, 2.0, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
+        eff_abs = st.number_input("Years reduction (absolute)", 0.0, 20.0, 0.75, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
         sd_change = st.number_input("SD of change (years)", 0.0, 20.0, 3.0, 0.1, help=HELP_BIO["sd_change"]) 
     else:
         eff_abs = st.number_input("Effect (absolute, beneficial)", 0.0, 100.0, 1.0, 0.1, help=HELP_BIO["eff_abs_custom"]) 
@@ -220,9 +254,9 @@ def panel_bioage():
             st.success(f"Updated SD(change) = {sd_change:.4f}")
 
     st.subheader("Contamination and attrition")
-    contam_rate = st.number_input("Contamination rate (controls)", 0.0, 1.0, 0.0, 0.05, format="%.2f", help=HELP_BIO["contam_rate"]) 
-    contam_frac = st.number_input("Effect fraction in contaminated controls", 0.0, 1.0, 0.0, 0.05, format="%.2f", help=HELP_BIO["contam_frac"]) 
-    attrition = st.number_input("Attrition rate", 0.0, 0.95, 0.0, 0.05, format="%.2f", help=HELP_BIO["attrition"]) 
+    contam_rate = st.number_input("Contamination rate (controls)", 0.0, 1.0, 0.30, 0.05, format="%.2f", help=HELP_BIO["contam_rate"]) 
+    contam_frac = st.number_input("Effect fraction in contaminated controls", 0.0, 1.0, 0.40, 0.05, format="%.2f", help=HELP_BIO["contam_frac"]) 
+    attrition = st.number_input("Attrition rate", 0.0, 0.95, 0.25, 0.05, format="%.2f", help=HELP_BIO["attrition"]) 
 
     st.subheader("Goal")
     goal = st.radio("Choose", ["Estimate power (fixed pairs)", "Find pairs for target power", "Find MDE", "Co-primary joint power"], index=0, help=HELP_BIO["goal"]) 
@@ -237,11 +271,65 @@ def panel_bioage():
             )
             icc_eff = spec.effective_icc()
             eff_obs = spec.observed_effect()
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("Effective ICC", f"{icc_eff:.3f}")
+            with m2:
+                st.metric("Observed effect (diluted)", f"{eff_obs:.4f}")
             if use_sim:
-                pw, avg_mag, se_pw = _simulate_pairs(spec, sims=int(sims))
+                with st.spinner("Running simulation…"):
+                    pw, avg_mag, se_pw = _simulate_pairs(spec, sims=int(sims))
             else:
                 pw = analytic_power_paired(spec.n_pairs, eff_obs, spec.sd_change, icc_eff, spec.alpha)
             st.metric("Estimated power", f"{pw:.3f}")
+            if use_sim:
+                lo, hi = _power_ci(pw, se_pw)
+                st.caption(f"95% MC CI for power: [{lo:.3f}, {hi:.3f}] (sims={int(sims)})")
+            # Design summary and share
+            st.subheader("Design Summary")
+            st.markdown(
+                f"- Endpoint: `{endpoint}`\n"
+                f"- Completing pairs: `{int(n_pairs)}`\n"
+                f"- Effect (abs): `{float(eff_abs):.4f}`\n"
+                f"- SD(change): `{float(sd_change):.4f}`\n"
+                f"- ICC MZ/DZ: `{float(icc_mz):.2f}` / `{float(icc_dz):.2f}` (eff={icc_eff:.3f})\n"
+                f"- Proportion MZ: `{float(prop_mz):.2f}`\n"
+                f"- Contamination: rate `{float(contam_rate):.2f}`, frac `{float(contam_frac):.2f}`\n"
+                f"- Attrition: `{float(attrition):.2f}`\n"
+                f"- Alpha: `{float(alpha):.3f}`; Simulation: `{bool(use_sim)}` (sims={int(sims)})\n"
+            )
+            _download_button(
+                "Download scenario (JSON)",
+                payload={
+                    "study": "bio_age",
+                    "endpoint": endpoint,
+                    "inputs": {
+                        "n_pairs": int(n_pairs),
+                        "effect_abs": float(eff_abs),
+                        "sd_change": float(sd_change),
+                        "icc_mz": float(icc_mz),
+                        "icc_dz": float(icc_dz),
+                        "prop_mz": float(prop_mz),
+                        "contamination_rate": float(contam_rate),
+                        "contamination_effect": float(contam_frac),
+                        "attrition": float(attrition),
+                        "alpha": float(alpha),
+                        "seed": int(seed),
+                        "sims": int(sims),
+                        "use_sim": bool(use_sim),
+                    },
+                    "results": {
+                        "power": float(pw),
+                        "power_ci": _power_ci(pw, se_pw) if use_sim else None,
+                        "effective_icc": float(icc_eff),
+                        "observed_effect": float(eff_obs),
+                    },
+                },
+                key="bio_fixed_power",
+            )
+            # Update URL (new API)
+            st.query_params["study"] = "bio"
+            st.query_params["use_sim"] = "1" if use_sim else "0"
             if attrition > 0:
                 n_enroll = math.ceil(int(n_pairs) / (1.0 - float(attrition)))
                 st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} pairs ({n_enroll*2} individuals)")
@@ -259,25 +347,41 @@ def panel_bioage():
             icc_eff = spec0.effective_icc()
             eff_obs = spec0.observed_effect()
             if use_sim:
-                low, high = int(n_min), int(n_max)
-                best_n, best_pw = high, 0.0
-                while low <= high:
-                    mid = (low + high) // 2
-                    spec = AgeTwinSpec(
-                        n_pairs=int(mid), effect_abs=float(eff_abs), sd_change=float(sd_change),
-                        prop_mz=float(prop_mz), icc_mz=float(icc_mz), icc_dz=float(icc_dz), alpha=float(alpha), seed=int(seed),
-                        contamination_rate=float(contam_rate), contamination_effect=float(contam_frac)
-                    )
-                    pw, _, _ = _simulate_pairs(spec, sims=max(500, int(sims)//2))
-                    if pw >= float(target_power):
-                        best_n, best_pw = mid, pw
-                        high = mid - 1
-                    else:
-                        low = mid + 1
+                with st.spinner("Searching N via simulation…"):
+                    low, high = int(n_min), int(n_max)
+                    best_n, best_pw = high, 0.0
+                    # Rough iteration bound for binary search
+                    max_iter = 1 + int(math.ceil(math.log2(max(2, high - low + 1))))
+                    prog = st.progress(0)
+                    it = 0
+                    while low <= high:
+                        mid = (low + high) // 2
+                        spec = AgeTwinSpec(
+                            n_pairs=int(mid), effect_abs=float(eff_abs), sd_change=float(sd_change),
+                            prop_mz=float(prop_mz), icc_mz=float(icc_mz), icc_dz=float(icc_dz), alpha=float(alpha), seed=int(seed),
+                            contamination_rate=float(contam_rate), contamination_effect=float(contam_frac)
+                        )
+                        sims_mid = max(500, int(sims)//2)
+                        pw, _, _ = _simulate_pairs(spec, sims=sims_mid)
+                        if pw >= float(target_power):
+                            best_n, best_pw = mid, pw
+                            high = mid - 1
+                        else:
+                            low = mid + 1
+                        it += 1
+                        prog.progress(min(1.0, it / max_iter))
+                    prog.empty()
             else:
                 best_n, best_pw = analytic_pairs_for_power(float(target_power), float(eff_obs), float(sd_change), float(icc_eff), float(alpha))
             st.metric("Required pairs (approx)", f"{best_n}")
             st.write(f"Achieved power at N*: {best_pw:.3f}")
+            if use_sim:
+                se = _approx_se(best_pw, max(500, int(sims)//2))
+                lo, hi = _power_ci(best_pw, se)
+                st.caption(f"95% MC CI for power at N*: [{lo:.3f}, {hi:.3f}]")
+            # Update URL (new API)
+            st.query_params["study"] = "bio"
+            st.query_params["use_sim"] = "1" if use_sim else "0"
             if attrition > 0:
                 n_enroll = math.ceil(int(best_n) / (1.0 - float(attrition)))
                 st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} pairs ({n_enroll*2} individuals)")
@@ -308,7 +412,7 @@ def panel_bioage():
             dpace_eff = st.number_input("DunedinPACE slowing (abs)", 0.0, 1.0, 0.03, 0.005, format="%.3f", help=HELP_BIO["eff_abs_dpace"]) 
             dpace_sd = st.number_input("DunedinPACE SD(change)", 0.0, 1.0, 0.10, 0.01, format="%.3f", help=HELP_BIO["sd_change"]) 
         with colB:
-            grim_eff = st.number_input("GrimAge years reduction", 0.0, 20.0, 2.0, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
+            grim_eff = st.number_input("GrimAge years reduction", 0.0, 20.0, 0.75, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
             grim_sd = st.number_input("GrimAge SD(change)", 0.0, 20.0, 3.0, 0.1, help=HELP_BIO["sd_change"]) 
         pair_corr = st.slider("Pair-effect correlation across endpoints", 0.0, 1.0, 0.8, 0.05, help=HELP_BIO["pair_corr"]) 
         n_pairs_co = st.number_input("Completing pairs (co-primary)", 2, 100000, 700, 10, help=HELP_BIO["n_pairs_co"]) 
@@ -324,9 +428,48 @@ def panel_bioage():
                 prop_mz=float(prop_mz), icc_mz=float(icc_mz), icc_dz=float(icc_dz), alpha=float(alpha_co), seed=int(seed) + 1,
                 contamination_rate=float(contam_rate), contamination_effect=float(contam_frac),
             )
-            pw_joint, pw1, pw2 = _simulate_co_primary(spec1, spec2, sims=int(sims_co), alpha=float(alpha_co), pair_effect_corr=float(pair_corr))
+            with st.spinner("Simulating joint power…"):
+                pw_joint, pw1, pw2 = _simulate_co_primary(
+                    spec1, spec2, sims=int(sims_co), alpha=float(alpha_co), pair_effect_corr=float(pair_corr)
+                )
             st.metric("Joint power (both significant)", f"{pw_joint:.3f}")
             st.write(f"Marginal — DunedinPACE: {pw1:.3f}; GrimAge: {pw2:.3f}")
+            # CI approximations
+            se_joint = _approx_se(pw_joint, int(sims_co))
+            lo_j, hi_j = _power_ci(pw_joint, se_joint)
+            st.caption(f"95% MC CI for joint power: [{lo_j:.3f}, {hi_j:.3f}] (sims={int(sims_co)})")
+            # Share
+            _download_button(
+                "Download scenario (JSON)",
+                payload={
+                    "study": "bio_age_coprimary",
+                    "inputs": {
+                        "n_pairs": int(n_pairs_co),
+                        "dpace_effect": float(dpace_eff),
+                        "dpace_sd": float(dpace_sd),
+                        "grim_effect": float(grim_eff),
+                        "grim_sd": float(grim_sd),
+                        "pair_corr": float(pair_corr),
+                        "icc_mz": float(icc_mz),
+                        "icc_dz": float(icc_dz),
+                        "prop_mz": float(prop_mz),
+                        "contamination_rate": float(contam_rate),
+                        "contamination_effect": float(contam_frac),
+                        "alpha_each": float(alpha_co),
+                        "seed": int(seed),
+                        "sims": int(sims_co),
+                    },
+                    "results": {
+                        "power_joint": float(pw_joint),
+                        "power_joint_ci": (lo_j, hi_j),
+                        "power_dpace": float(pw1),
+                        "power_grimage": float(pw2),
+                    },
+                },
+                key="bio_coprimary",
+            )
+            st.query_params["study"] = "bio"
+            st.query_params["use_sim"] = "1"
 
 
 def panel_sleep():
@@ -371,10 +514,10 @@ def panel_sleep():
     st.subheader("Contamination and attrition (optional)")
     col6, col7 = st.columns(2)
     with col6:
-        contamination_rate = st.number_input("Contamination rate (controls)", min_value=0.0, max_value=1.0, value=0.0, step=0.05, format="%.2f", help=HELP_SLEEP["contamination_rate"]) 
+        contamination_rate = st.number_input("Contamination rate (controls)", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.2f", help=HELP_SLEEP["contamination_rate"]) 
     with col7:
-        contamination_effect = st.number_input("Fraction of full effect in contaminated controls", min_value=0.0, max_value=1.0, value=0.0, step=0.05, format="%.2f", help=HELP_SLEEP["contamination_effect"]) 
-    attrition = st.number_input("Attrition rate", min_value=0.0, max_value=0.95, value=0.0, step=0.05, format="%.2f", help=HELP_SLEEP["attrition"]) 
+        contamination_effect = st.number_input("Fraction of full effect in contaminated controls", min_value=0.0, max_value=1.0, value=0.40, step=0.05, format="%.2f", help=HELP_SLEEP["contamination_effect"]) 
+    attrition = st.number_input("Attrition rate", min_value=0.0, max_value=0.95, value=0.25, step=0.05, format="%.2f", help=HELP_SLEEP["attrition"]) 
 
     st.subheader("Goal")
     mode = st.radio("Choose", ("Estimate power for fixed N", "Find N for target power"), index=0, help=HELP_SLEEP["mode"]) 
@@ -388,8 +531,49 @@ def panel_sleep():
                 alpha=float(alpha), analysis="cluster_robust", seed=int(seed),
                 contamination_rate=float(contamination_rate), contamination_effect=float(contamination_effect), attrition_rate=float(attrition)
             )
-            pw, se = simulate_power(spec, sims=int(sims))
+            with st.spinner("Running simulation…"):
+                pw, avg_est = simulate_power(spec, sims=int(sims))
             st.metric("Estimated power", f"{pw:.3f}")
+            se_pw = _approx_se(pw, int(sims))
+            lo, hi = _power_ci(pw, se_pw)
+            st.caption(f"95% MC CI for power: [{lo:.3f}, {hi:.3f}] (sims={int(sims)})")
+            # Design summary and share
+            st.subheader("Design Summary")
+            st.markdown(
+                f"- Total N (individuals): `{int(n_total)}`\n"
+                f"- Effect (ISI points): `{float(effect_points):.2f}`; SD(change): `{float(sd_change):.2f}`\n"
+                f"- Twin proportion: `{float(prop_twins):.2f}`; MZ among twins: `{float(prop_mz):.2f}`\n"
+                f"- ICC MZ/DZ: `{float(icc_mz):.2f}` / `{float(icc_dz):.2f}`\n"
+                f"- Contamination: rate `{float(contamination_rate):.2f}`, frac `{float(contamination_effect):.2f}`\n"
+                f"- Attrition: `{float(attrition):.2f}`; Alpha: `{float(alpha):.3f}`; Sims: `{int(sims)}`\n"
+            )
+            _download_button(
+                "Download scenario (JSON)",
+                payload={
+                    "study": "sleep_isi",
+                    "inputs": {
+                        "n_total": int(n_total),
+                        "effect_points": float(effect_points),
+                        "sd_change": float(sd_change),
+                        "prop_twins": float(prop_twins),
+                        "prop_mz": float(prop_mz),
+                        "icc_mz": float(icc_mz),
+                        "icc_dz": float(icc_dz),
+                        "contamination_rate": float(contamination_rate),
+                        "contamination_effect": float(contamination_effect),
+                        "attrition": float(attrition),
+                        "alpha": float(alpha),
+                        "seed": int(seed),
+                        "sims": int(sims),
+                    },
+                    "results": {
+                        "power": float(pw),
+                        "power_ci": (lo, hi),
+                        "avg_estimated_effect": float(avg_est),
+                    },
+                },
+                key="sleep_fixed_power",
+            )
             if attrition > 0:
                 n_enroll = math.ceil(int(n_total) / (1.0 - float(attrition)))
                 st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} individuals")
@@ -417,9 +601,44 @@ def panel_sleep():
                 alpha=float(alpha), analysis="cluster_robust", seed=int(seed),
                 contamination_rate=float(contamination_rate), contamination_effect=float(contamination_effect), attrition_rate=float(attrition)
             )
-            best_n, best_pw = find_n_for_power(spec0, float(target_power), low=int(n_min), high=int(n_max), sims=int(sims))
+            with st.spinner("Searching N via simulation…"):
+                best_n, best_pw = find_n_for_power(
+                    spec0, float(target_power), low=int(n_min), high=int(n_max), sims=int(sims)
+                )
             st.metric("Required N (individuals)", f"{best_n}")
             st.write(f"Achieved power at N*: {best_pw:.3f}")
+            se = _approx_se(best_pw, int(sims))
+            lo, hi = _power_ci(best_pw, se)
+            st.caption(f"95% MC CI for power at N*: [{lo:.3f}, {hi:.3f}]")
+            _download_button(
+                "Download scenario (JSON)",
+                payload={
+                    "study": "sleep_isi_find_n",
+                    "inputs": {
+                        "target_power": float(target_power),
+                        "search_min": int(n_min),
+                        "search_max": int(n_max),
+                        "effect_points": float(effect_points),
+                        "sd_change": float(sd_change),
+                        "prop_twins": float(prop_twins),
+                        "prop_mz": float(prop_mz),
+                        "icc_mz": float(icc_mz),
+                        "icc_dz": float(icc_dz),
+                        "contamination_rate": float(contamination_rate),
+                        "contamination_effect": float(contamination_effect),
+                        "attrition": float(attrition),
+                        "alpha": float(alpha),
+                        "seed": int(seed),
+                        "sims": int(sims),
+                    },
+                    "results": {
+                        "n_required": int(best_n),
+                        "power": float(best_pw),
+                        "power_ci": (lo, hi),
+                    },
+                },
+                key="sleep_find_n",
+            )
             if attrition > 0:
                 n_enroll = math.ceil(int(best_n) / (1.0 - float(attrition)))
                 st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} individuals")

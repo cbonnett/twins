@@ -56,8 +56,6 @@ Notes
 - Effect magnitude input represents absolute magnitude of benefit (always positive).
 - Internally, treated outcomes are y_treat = baseline - effect_abs (reduction).
 - All outputs report beneficial effects as positive values for clarity.
-- If SciPy/statsmodels are unavailable, the script falls back to accurate
-  normal approximations and paired-difference t-tests computed directly.
 - RECOMMENDATION: Use --use-simulation for final trial calculations when MZ/DZ
   ICCs differ substantially or for co-primary endpoint analysis.
 
@@ -92,26 +90,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import math
 import numpy as np
 
-try:
-    import scipy.stats as sps
-    _HAS_SCIPY = True
-except Exception:
-    _HAS_SCIPY = False
-    warnings.warn("SciPy not available. Using normal approximations.", stacklevel=2)
-
-try:
-    import statsmodels.api as sm  # noqa: F401
-    import statsmodels.formula.api as smf  # noqa: F401
-    _HAS_STATSMODELS = True
-except Exception:
-    _HAS_STATSMODELS = False
+import scipy.stats as sps
+import statsmodels.api as sm  # noqa: F401
+import statsmodels.formula.api as smf  # noqa: F401
 
 
 # ---------- Utility functions ----------
@@ -181,28 +168,13 @@ def inflate_for_attrition(n_completing: int, attrition_rate: float) -> int:
 
 
 def _z_alpha_two_sided(alpha: float) -> float:
-    """z for two-sided alpha; SciPy if present, else a safe fallback."""
-    if _HAS_SCIPY:
-        return float(sps.norm.ppf(1.0 - alpha / 2.0))
-    # Common alphas
-    if abs(alpha - 0.05) < 1e-8:
-        return 1.959963984540054
-    if abs(alpha - 0.025) < 1e-8:
-        return 2.2413698143170934
-    if abs(alpha - 0.10) < 1e-8:
-        return 1.6448536269514722
-    if abs(alpha - 0.01) < 1e-8:
-        return 2.5758293035489004
-    # Approximate
-    return 1.959963984540054
+    """z for two-sided alpha (via SciPy)."""
+    return float(sps.norm.ppf(1.0 - alpha / 2.0))
 
 
 def _t_alpha_two_sided(alpha: float, df: int) -> float:
-    """t critical for two-sided alpha with df; normal fallback if SciPy missing."""
-    if _HAS_SCIPY:
-        return float(sps.t.ppf(1.0 - alpha / 2.0, df))
-    z = _z_alpha_two_sided(alpha)
-    return z  # reasonable for large df
+    """t critical for two-sided alpha with df (via SciPy)."""
+    return float(sps.t.ppf(1.0 - alpha / 2.0, df))
 
 
 def _two_sided_power_normal(lambda_nc: float, alpha: float) -> float:
@@ -211,15 +183,9 @@ def _two_sided_power_normal(lambda_nc: float, alpha: float) -> float:
     T ~ Normal(lambda_nc, 1). Reject if |T| > z_{alpha/2}.
     Power = P(T > z) + P(T < -z) = 1 - Phi(z - lambda) + Phi(-z - lambda).
     """
-    if _HAS_SCIPY:
-        z = float(sps.norm.ppf(1.0 - alpha / 2.0))
-        Phi = sps.norm.cdf
-        return float((1.0 - Phi(z - lambda_nc)) + Phi(-z - lambda_nc))
-    # manual normal cdf via erf
-    def Phi_manual(x: float) -> float:
-        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-    z = _z_alpha_two_sided(alpha)
-    return float((1.0 - Phi_manual(z - lambda_nc)) + Phi_manual(-z - lambda_nc))
+    z = float(sps.norm.ppf(1.0 - alpha / 2.0))
+    Phi = sps.norm.cdf
+    return float((1.0 - Phi(z - lambda_nc)) + Phi(-z - lambda_nc))
 
 
 def d_paired(effect_abs: float, sd_change: float, icc: float) -> float:
@@ -249,23 +215,19 @@ def analytic_power_paired(n_pairs: int, effect_abs: float, sd_change: float, icc
         pw = _two_sided_power_normal(lam, alpha)
         return float(max(0.0, min(1.0, pw)))
 
-    if _HAS_SCIPY:
-        try:
-            tcrit = float(sps.t.ppf(1.0 - alpha / 2.0, df))
-            # Power = P(T > tcrit) + P(T < -tcrit), T ~ nct(df, lam)
-            cdf_pos = sps.nct.cdf(tcrit, df, lam)
-            cdf_neg = sps.nct.cdf(-tcrit, df, lam)
-            pw = float((1.0 - cdf_pos) + cdf_neg)
-            if math.isnan(pw):
-                pw = _two_sided_power_normal(lam, alpha)
-            return float(max(0.0, min(1.0, pw)))
-        except Exception:
-            # Fallback to normal approx on any SciPy error
+    try:
+        tcrit = float(sps.t.ppf(1.0 - alpha / 2.0, df))
+        # Power = P(T > tcrit) + P(T < -tcrit), T ~ nct(df, lam)
+        cdf_pos = sps.nct.cdf(tcrit, df, lam)
+        cdf_neg = sps.nct.cdf(-tcrit, df, lam)
+        pw = float((1.0 - cdf_pos) + cdf_neg)
+        if math.isnan(pw):
             pw = _two_sided_power_normal(lam, alpha)
-            return float(max(0.0, min(1.0, pw)))
-    # Normal approximation on test statistic
-    pw = _two_sided_power_normal(lam, alpha)
-    return float(max(0.0, min(1.0, pw)))
+        return float(max(0.0, min(1.0, pw)))
+    except Exception:
+        # Fallback to normal approx on any SciPy error
+        pw = _two_sided_power_normal(lam, alpha)
+        return float(max(0.0, min(1.0, pw)))
 
 
 def analytic_pairs_for_power(target_power: float, effect_abs: float, sd_change: float, icc_eff: float,
@@ -375,10 +337,10 @@ def _compute_paired_pval(d: np.ndarray) -> float:
         return 0.0
     t_stat = abs(d_bar / se)
     df = n - 1
-    if _HAS_SCIPY:
+    try:
         return 2.0 * sps.t.sf(t_stat, df)
-    else:
-        # Normal approximation
+    except Exception:
+        # Normal approximation if SciPy errors
         Phi = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
         return 2.0 * (1.0 - Phi(t_stat))
 
@@ -883,33 +845,27 @@ def run_cli():
     
     # MODE: mde
     elif args.mode == "mde":
-        if args.use_simulation:
-            # Use analytic as starting point, could refine with simulation if needed
-            mde = analytic_mde(spec.n_pairs, args.target_power, spec.sd_change, icc_eff, spec.alpha)
-        else:
-            mde = analytic_mde(spec.n_pairs, args.target_power, spec.sd_change, icc_eff, spec.alpha)
-        
-        # Adjust MDE for contamination (inflate since contamination reduces observed effect)
-        if args.contamination_rate > 0:
-            reduction_factor = 1.0 - (args.contamination_rate * args.contamination_effect)
-            mde_no_contam = mde / reduction_factor
-        else:
-            mde_no_contam = mde
-        
+        # Compute the observed MDE (what the paired test 'sees')
+        mde_obs = analytic_mde(spec.n_pairs, args.target_power, spec.sd_change, icc_eff, spec.alpha)
+
         print("=" * 70)
         print("MINIMAL DETECTABLE EFFECT: Within-Pair Twin RCT")
         print("=" * 70)
         print(f"\nEndpoint: {args.endpoint}")
         print(f"Completing pairs: {spec.n_pairs}")
         print(f"Target power: {args.target_power:.3f}, Alpha: {spec.alpha:.3f}")
-        
+
         print(f"\nRESULTS:")
-        print(f"  MDE (absolute, beneficial): {mde:.4f}")
+        print(f"  Observed MDE (on test scale): {mde_obs:.4f}")
+
         if args.contamination_rate > 0:
-            print(f"  MDE without contamination: {mde_no_contam:.4f}")
-            print(f"    (Accounts for {args.contamination_rate:.1%} contamination at "
-                  f"{args.contamination_effect:.1%} effect)")
-        
+            reduction = 1.0 - (args.contamination_rate * args.contamination_effect)
+            reduction = max(1e-12, reduction)  # guard
+            mde_true_needed = mde_obs / reduction
+            print(f"  Underlying true effect required (given contamination): {mde_true_needed:.4f}")
+            print(f"    Reduction factor from contamination: {reduction:.3f}")
+            print(f"    (If there were no contamination, the required true effect equals the observed MDE.)")
+
         print(f"\nDESIGN:")
         print(f"  SD(individual change): {spec.sd_change:.4f}")
         print(f"  ICCs: MZ={spec.icc_mz:.3f}, DZ={spec.icc_dz:.3f}, prop_MZ={spec.prop_mz:.2f}")

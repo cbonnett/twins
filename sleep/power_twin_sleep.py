@@ -74,18 +74,9 @@ import numpy as np
 import pandas as pd
 import math
 
-try:
-    import statsmodels.api as sm
-    import statsmodels.formula.api as smf
-    _HAS_STATSMODELS = True
-except Exception:  # pragma: no cover
-    _HAS_STATSMODELS = False
-
-try:
-    import scipy.stats as sps  # for t distribution p-values (optional)
-    _HAS_SCIPY = True
-except Exception:  # pragma: no cover
-    _HAS_SCIPY = False
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import scipy.stats as sps  # for t distribution p-values
 
 
 @dataclass
@@ -280,8 +271,6 @@ def _pvalue_for_treat(df: pd.DataFrame, alpha: float, analysis: str = "cluster_r
     df["zygosity"] = pd.Categorical(df["zygosity"], categories=["SINGLE", "DZ", "MZ"], ordered=False)
 
     if analysis == "mixedlm":
-        if not _HAS_STATSMODELS:
-            analysis = "gls_known"  # fallback
         # Random intercept per pair
         try:
             model = smf.mixedlm("y ~ treat + C(zygosity)", df, groups=df["pair_id"]).fit(reml=False, disp=False)
@@ -293,14 +282,11 @@ def _pvalue_for_treat(df: pd.DataFrame, alpha: float, analysis: str = "cluster_r
             analysis = "cluster_robust"
 
     if analysis == "cluster_robust":
-        if not _HAS_STATSMODELS:
-            analysis = "gls_known"  # fallback
-        else:
-            # OLS + cluster-robust SE clustered by pair
-            model = smf.ols("y ~ treat + C(zygosity)", df).fit(cov_type="cluster", cov_kwds={"groups": df["pair_id"], "use_correction": True})
-            pval = model.pvalues.get("treat", np.nan)
-            coef = model.params.get("treat", np.nan)
-            return pval, coef
+        # OLS + cluster-robust SE clustered by pair
+        model = smf.ols("y ~ treat + C(zygosity)", df).fit(cov_type="cluster", cov_kwds={"groups": df["pair_id"], "use_correction": True})
+        pval = model.pvalues.get("treat", np.nan)
+        coef = model.params.get("treat", np.nan)
+        return pval, coef
 
     # Fallback: known-covariance GLS using provided sd_change and ICCs
     if sd_change is None or icc_mz is None or icc_dz is None:
@@ -319,10 +305,11 @@ def _normal_two_sided_pvalue(t: float) -> float:
 
 
 def _t_two_sided_pvalue(t: float, df: int) -> float:
-    if _HAS_SCIPY:
+    try:
         return 2.0 * sps.t.sf(abs(t), df)
-    # Normal approximation if scipy is unavailable
-    return _normal_two_sided_pvalue(t)
+    except Exception:
+        # Normal approximation on SciPy error
+        return _normal_two_sided_pvalue(t)
 
 
 def _pvalue_for_treat_gls_known(df: pd.DataFrame, sd_change: float, icc_mz: float, icc_dz: float) -> Tuple[float, float]:
@@ -453,18 +440,8 @@ def simulate_distribution(spec: TwinTrialSpec, sims: int = 1000):
 
 
 def _z_two_sided(alpha: float) -> float:
-    """Two-sided normal z for given alpha. Uses SciPy if available, else common values/approx."""
-    if _HAS_SCIPY:
-        return float(sps.norm.ppf(1.0 - alpha / 2.0))
-    # Fallback for common alphas
-    if abs(alpha - 0.05) < 1e-6:
-        return 1.959963984540054
-    if abs(alpha - 0.10) < 1e-6:
-        return 1.6448536269514722
-    if abs(alpha - 0.01) < 1e-6:
-        return 2.5758293035489004
-    # Default to 95% if unusual alpha
-    return 1.959963984540054
+    """Two-sided normal z for given alpha (SciPy)."""
+    return float(sps.norm.ppf(1.0 - alpha / 2.0))
 
 
 def binomial_wilson_ci(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:

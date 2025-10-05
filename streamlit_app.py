@@ -502,14 +502,16 @@ def panel_sleep():
             st.success(f"Updated SD(change) = {sd_change:.3f}")
 
     st.subheader("Twin structure and ICCs")
-    col3, col4, col5 = st.columns(3)
-    with col3:
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
         prop_twins = st.number_input("Proportion twins", min_value=0.0, max_value=1.0, value=0.9, step=0.05, format="%.2f", help=HELP_SLEEP["prop_twins"]) 
-    with col4:
+    with r1c2:
         prop_mz = st.number_input("Proportion MZ among twins", min_value=0.0, max_value=1.0, value=0.5, step=0.05, format="%.2f", help=HELP_SLEEP["prop_mz"]) 
-    with col5:
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
         icc_mz = st.number_input("ICC (MZ)", min_value=0.0, max_value=0.99, value=0.5, step=0.05, format="%.2f", help=HELP_SLEEP["icc_mz"]) 
-    icc_dz = st.number_input("ICC (DZ)", min_value=0.0, max_value=0.99, value=0.25, step=0.05, format="%.2f", help=HELP_SLEEP["icc_dz"]) 
+    with r2c2:
+        icc_dz = st.number_input("ICC (DZ)", min_value=0.0, max_value=0.99, value=0.25, step=0.05, format="%.2f", help=HELP_SLEEP["icc_dz"]) 
 
     st.subheader("Contamination and attrition (optional)")
     col6, col7 = st.columns(2)
@@ -580,10 +582,10 @@ def panel_sleep():
 
     else:
         target_power = st.number_input("Target power", min_value=0.60, max_value=0.995, value=0.90, step=0.01, format="%.2f", help=HELP_SLEEP["target_power"]) 
-        n_min = st.number_input("Search min", min_value=20, max_value=100000, value=100, step=10, help=HELP_SLEEP["n_min"]) 
-        n_max = st.number_input("Search max", min_value=40, max_value=400000, value=10000, step=20, help=HELP_SLEEP["n_max"]) 
+        n_min = st.number_input("Search min", min_value=20, max_value=100000, value=20, step=10, help=HELP_SLEEP["n_min"]) 
+        n_max = st.number_input("Search max", min_value=40, max_value=400000, value=200, step=20, help=HELP_SLEEP["n_max"]) 
 
-    # Inline guidance and best practices
+    # Inline guidance and best practices (kept separate from the action button)
     with st.expander("Guidance, assumptions, and sanity checks", expanded=False):
         st.markdown(
             "- Under null (effect≈0), power≈alpha; use this to sanity‑check inputs.\n"
@@ -594,6 +596,9 @@ def panel_sleep():
             "- For bio‑age, SD(pair‑diff)=sqrt(2·(1−ICC_eff))·SD(change). Paired d = effect_abs / SD(pair‑diff).\n"
             "- For sleep, analysis defaults to cluster‑robust OLS on individuals clustered by pair; MixedLM available in the module for sensitivity checks."
         )
+
+    # Action button only in the 'Find N' mode (kept outside expander for visibility)
+    if mode == "Find N for target power":
         if st.button("Find N for target power", type="primary"):
             spec0 = TwinTrialSpec(
                 n_total=int(n_min), effect_points=float(effect_points), sd_change=float(sd_change),
@@ -603,7 +608,11 @@ def panel_sleep():
             )
             with st.spinner("Searching N via simulation…"):
                 best_n, best_pw = find_n_for_power(
-                    spec0, float(target_power), low=int(n_min), high=int(n_max), sims=int(sims)
+                    float(target_power),
+                    spec0,
+                    sims=int(sims),
+                    n_min=int(n_min),
+                    n_max=int(n_max),
                 )
             st.metric("Required N (individuals)", f"{best_n}")
             st.write(f"Achieved power at N*: {best_pw:.3f}")

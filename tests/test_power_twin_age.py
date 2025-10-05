@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 import pytest
 
-import biologicol_age.power_twin_age as pta
+import biological_age.power_twin_age as pta
 
 
 # ---------- Utility validations ----------
@@ -283,7 +283,7 @@ def test_resolve_sd_change_variants():
 def _run_power_cli(args):
     try:
         res = subprocess.run(
-            ["python3", "biologicol_age/power_twin_age.py"] + list(args),
+            ["python3", "biological_age/power_twin_age.py"] + list(args),
             capture_output=True,
             text=True,
             timeout=60,

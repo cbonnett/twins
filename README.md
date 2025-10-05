@@ -20,7 +20,7 @@ Both projects expose CLIs, and the top-level `streamlit_app.py` provides a singl
 │   └── config.toml               # App theming
 ├── requirements.txt              # Shared dependencies for CLI + UI
 ├── streamlit_app.py              # Unified Streamlit launcher (bio-age + sleep)
-├── biologicol_age/
+├── biological_age/
 │   ├── power_twin_age.py         # Analytic + simulation engine + CLI
 │   └── README.md                 # Bio-age module docs
 ├── sleep/
@@ -89,17 +89,17 @@ Shareable URL params:
 
 Both analysis engines can be scripted for batch workflows or reproducible reports.
 
-- Biological Age — see `biologicol_age/README.md` for CLI examples covering analytic vs simulation, co-primary endpoints, and helpers like `sd_change_from_pre_post`.
+- Biological Age — see `biological_age/README.md` for CLI examples covering analytic vs simulation, co-primary endpoints, and helpers like `sd_change_from_pre_post`.
 - Sleep (ISI) — see `sleep/README.md` for Monte Carlo examples with cluster-robust OLS or MixedLM, contamination, and attrition modelling.
 
 Typical invocations:
 
 ```bash
-python biologicol_age/power_twin_age.py --mode power --n-pairs 700 --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 --icc-mz 0.55 --icc-dz 0.55 --prop-mz 0.5
+python biological_age/power_twin_age.py --mode power --n-pairs 700 --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 --icc-mz 0.55 --icc-dz 0.55 --prop-mz 0.5
 python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --sims 2000
  
 # Co‑primary biological age example
-python biologicol_age/power_twin_age.py --mode co-primary-power --n-pairs 700 \
+python biological_age/power_twin_age.py --mode co-primary-power --n-pairs 700 \
   --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 \
   --endpoint2 grimage --effect2-years 2.0 --sd2-change 3.0 \
   --use-simulation --sims 5000 --pair-effect-corr 0.8
@@ -116,7 +116,7 @@ The biological-age module ships with a regression suite covering validation help
 PYTHONPATH=. pytest tests/test_power_twin_age.py
 ```
 
-`PYTHONPATH=.` ensures `biologicol_age` is importable when running tests from the root. Add similar coverage for the sleep module as new features land.
+`PYTHONPATH=.` ensures `biological_age` is importable when running tests from the root. Add similar coverage for the sleep module as new features land.
 
 
 ## Troubleshooting & Tips

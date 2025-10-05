@@ -4,7 +4,7 @@ Unified Streamlit app: run power/sample-size calculations for
 2) Sleep (ISI change; individually randomized with twin mix)
 
 This app is a thin UI that calls into the existing analysis modules:
-- biologicol_age.power_twin_age
+- biological_age.power_twin_age
 - sleep.power_twin_sleep
 """
 
@@ -17,7 +17,7 @@ from typing import Dict, Any
 import streamlit as st
 
 # Biological age imports
-from biologicol_age.power_twin_age import (
+from biological_age.power_twin_age import (
     AgeTwinSpec,
     sd_change_from_pre_post as age_sd_change_from_pre_post,
     analytic_power_paired,

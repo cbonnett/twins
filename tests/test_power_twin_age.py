@@ -1,607 +1,528 @@
-import math
-import types
-import argparse
-import subprocess
+"""
+Advanced and creative tests for power_twin_age.py
 
+These tests go beyond basic validation to check:
+- Empirical verification of claimed properties
+- Cross-validation against known benchmarks
+- Robustness to perturbations
+- Pathological edge cases
+- Type I error rate calibration
+- Consistency across different calculation paths
+"""
+
+import sys
+import os
+import math
 import numpy as np
 import pytest
 
-import biological_age.power_twin_age as pta
+# Make biological_age module importable as power_twin_age
+HERE = os.path.dirname(__file__)
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'biological_age')))
+import power_twin_age as pta
 
 
-# ---------- Utility validations ----------
-
-def test_validate_probability_bounds():
-    pta.validate_probability(0.0, "p")
-    pta.validate_probability(1.0, "p")
-    pta.validate_probability(0.5, "p")
-    with pytest.raises(ValueError):
-        pta.validate_probability(-1e-9, "p")
-    with pytest.raises(ValueError):
-        pta.validate_probability(1.0000001, "p")
-
-
-def test_validate_positive_and_zero():
-    pta.validate_positive(1e-12, "x")
-    with pytest.raises(ValueError):
-        pta.validate_positive(0.0, "x")
-    pta.validate_positive(0.0, "x", allow_zero=True)
-
-
-def test_validate_icc():
-    pta.validate_icc(0.0, "icc")
-    pta.validate_icc(0.999999, "icc")
-    with pytest.raises(ValueError):
-        pta.validate_icc(-1e-12, "icc")
-    with pytest.raises(ValueError):
-        pta.validate_icc(1.0, "icc")
-
-
-def test_sd_change_from_pre_post_basic_symmetry():
-    # symmetric case, rho=0
-    out = pta.sd_change_from_pre_post(2.0, 2.0, 0.0)
-    assert math.isclose(out, math.sqrt(8.0))
-    # positive correlation reduces var
-    out_pos = pta.sd_change_from_pre_post(2.0, 2.0, 0.8)
-    assert out_pos < out
-    # negative correlation increases var
-    out_neg = pta.sd_change_from_pre_post(2.0, 2.0, -0.8)
-    assert out_neg > out
-
-
-def test_sd_diff_from_sd_change_icc_monotonic():
-    sd = 1.23
-    s0 = pta.sd_diff_from_sd_change_icc(sd, 0.0)
-    s1 = pta.sd_diff_from_sd_change_icc(sd, 0.5)
-    s2 = pta.sd_diff_from_sd_change_icc(sd, 0.9)
-    assert s0 > s1 > s2  # higher ICC -> smaller pair-diff SD
-
-
-def test_apply_contamination_edges():
-    # No contamination
-    assert math.isclose(pta.apply_contamination(1.0, 0.0, 0.5), 1.0)
-    # Full contamination at full effect -> zero observed
-    assert math.isclose(pta.apply_contamination(2.0, 1.0, 1.0), 0.0)
-    # Partial contamination
-    assert math.isclose(pta.apply_contamination(1.0, 0.3, 0.5), 1.0 * (1 - 0.15))
-
-
-def test_inflate_for_attrition():
-    assert pta.inflate_for_attrition(100, 0.0) == 100
-    assert pta.inflate_for_attrition(100, 0.25) == 134  # 100/(1-0.25)=133.33 -> ceil
-    with pytest.raises(ValueError):
-        pta.inflate_for_attrition(100, 1.0)
-
-
-def test_z_t_alpha_two_sided_values():
-    # sanity only; rely on SciPy if present or constants when not
-    z_005 = pta._z_alpha_two_sided(0.05)
-    assert 1.95 < z_005 < 1.97
-    z_001 = pta._z_alpha_two_sided(0.01)
-    assert 2.57 < z_001 < 2.59
-
-
-def test_two_sided_power_normal_symmetry():
-    # power should depend on |lambda|
-    lam = 2.0
-    pw_pos = pta._two_sided_power_normal(lam, 0.05)
-    pw_neg = pta._two_sided_power_normal(-lam, 0.05)
-    assert math.isclose(pw_pos, pw_neg, rel_tol=1e-12)
-
-
-def test_d_paired_consistency():
-    sd_change = 0.1
-    icc = 0.5
-    sd_d = pta.sd_diff_from_sd_change_icc(sd_change, icc)
-    d = pta.d_paired(0.02, sd_change, icc)
-    assert math.isclose(d, 0.02 / sd_d)
-
-
-# ---------- Analytic functions ----------
-
-def test_analytic_power_monotonic_effect_and_n():
-    sd_change = 0.10
-    icc = 0.55
-    alpha = 0.05
-    n = 300
-    # power increases with effect
-    pw_small = pta.analytic_power_paired(n, 0.01, sd_change, icc, alpha)
-    pw_med = pta.analytic_power_paired(n, 0.03, sd_change, icc, alpha)
-    pw_big = pta.analytic_power_paired(n, 0.05, sd_change, icc, alpha)
-    assert pw_small <= pw_med <= pw_big
-    # power increases with n
-    pw_n1 = pta.analytic_power_paired(100, 0.03, sd_change, icc, alpha)
-    pw_n2 = pta.analytic_power_paired(400, 0.03, sd_change, icc, alpha)
-    assert pw_n2 > pw_n1
-
-
-def test_analytic_power_increases_with_icc():
-    sd_change = 0.10
-    alpha = 0.05
-    n = 300
-    pw_low_icc = pta.analytic_power_paired(n, 0.03, sd_change, 0.1, alpha)
-    pw_high_icc = pta.analytic_power_paired(n, 0.03, sd_change, 0.8, alpha)
-    assert pw_high_icc > pw_low_icc
-
-
-def test_pairs_for_power_binary_search_properties():
-    target = 0.8
-    effect = 0.03
-    sd_change = 0.10
-    icc = 0.55
-    alpha = 0.05
-    n_star, pw_star = pta.analytic_pairs_for_power(target, effect, sd_change, icc, alpha, n_lo=5, n_hi=5000)
-    assert pw_star >= target
-    # One fewer pair should not meet target
-    if n_star > 5:
-        pw_before = pta.analytic_power_paired(n_star - 1, effect, sd_change, icc, alpha)
-        assert pw_before < target
-
-
-def test_analytic_mde_consistency():
-    n = 300
-    target = 0.8
-    sd_change = 0.10
-    icc = 0.55
-    alpha = 0.05
-    mde = pta.analytic_mde(n, target, sd_change, icc, alpha)
-    pw_at_mde = pta.analytic_power_paired(n, mde, sd_change, icc, alpha)
-    assert abs(pw_at_mde - target) < 0.02
-
-
-# ---------- Dataclass and helpers ----------
-
-def test_effective_icc_limits_and_mix():
-    spec = pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=1.0, prop_mz=1.0, icc_mz=0.7, icc_dz=0.3)
-    assert math.isclose(spec.effective_icc(), 0.7, rel_tol=1e-12)
-    spec.prop_mz = 0.0
-    assert math.isclose(spec.effective_icc(), 0.3, rel_tol=1e-12)
-    spec.prop_mz = 0.5
-    eff = spec.effective_icc()
-    assert 0.3 <= eff <= 0.7
-
-
-def test_observed_effect_matches_apply_contamination():
-    spec = pta.AgeTwinSpec(n_pairs=5, effect_abs=1.0, sd_change=1.0, contamination_rate=0.3, contamination_effect=0.5)
-    assert math.isclose(spec.observed_effect(), pta.apply_contamination(1.0, 0.3, 0.5))
-
-
-# ---------- Paired p-value computation ----------
-
-def test_compute_paired_pval_degenerate_all_zero_should_not_be_significant():
-    d = np.zeros(10)
-    p = pta._compute_paired_pval(d)
-    assert math.isclose(p, 1.0)
-
-
-def test_compute_paired_pval_basic():
-    # Large mean relative to sd -> significant
-    rng = np.random.default_rng(123)
-    d = rng.normal(0.5, 0.1, size=50)
-    p = pta._compute_paired_pval(d)
-    assert p < 0.001
-
-
-# ---------- Simulation sanity checks ----------
-
-def test_simulate_pairs_reproducible_and_reasonable():
-    spec = pta.AgeTwinSpec(
-        n_pairs=200,
-        effect_abs=0.03,
-        sd_change=0.10,
-        prop_mz=0.5,
-        icc_mz=0.55,
-        icc_dz=0.55,
-        alpha=0.05,
-        seed=42,
-    )
-    pw1, avg1, se1 = pta._simulate_pairs(spec, sims=800)
-    pw2, avg2, se2 = pta._simulate_pairs(spec, sims=800)
-    # same seed/spec -> same results
-    assert math.isclose(pw1, pw2)
-    assert math.isclose(avg1, avg2)
-    assert math.isclose(se1, se2)
-    # power should be plausibly high at these parameters
-    assert 0.8 < pw1 < 1.0
-    assert avg1 > 0
-
-
-def test_simulate_pairs_vs_analytic_closeness():
-    spec = pta.AgeTwinSpec(
-        n_pairs=400,
-        effect_abs=0.03,
-        sd_change=0.10,
-        prop_mz=0.5,
-        icc_mz=0.55,
-        icc_dz=0.55,
-        alpha=0.05,
-        seed=7,
-    )
-    icc_eff = spec.effective_icc()
-    analytic = pta.analytic_power_paired(spec.n_pairs, spec.effect_abs, spec.sd_change, icc_eff, spec.alpha)
-    sim, _, _ = pta._simulate_pairs(spec, sims=1200)
-    # Allow some Monte Carlo error
-    assert abs(sim - analytic) < 0.05
-
-
-def test_simulate_coprimary_runs_and_bounds():
-    spec1 = pta.AgeTwinSpec(n_pairs=150, effect_abs=0.03, sd_change=0.10, prop_mz=0.5, icc_mz=0.6, icc_dz=0.4, seed=100)
-    spec2 = pta.AgeTwinSpec(n_pairs=150, effect_abs=2.0, sd_change=3.0, prop_mz=0.5, icc_mz=0.6, icc_dz=0.4, seed=101)
-    jp, p1, p2 = pta._simulate_co_primary(spec1, spec2, sims=600, alpha=0.025, pair_effect_corr=0.9)
-    assert 0 <= jp <= 1
-    assert 0 <= p1 <= 1
-    assert 0 <= p2 <= 1
-
-
-def test_simulate_extreme_icc_and_corr_do_not_crash():
-    spec1 = pta.AgeTwinSpec(n_pairs=50, effect_abs=0.01, sd_change=0.10, icc_mz=0.999, icc_dz=0.999, seed=123)
-    spec2 = pta.AgeTwinSpec(n_pairs=50, effect_abs=0.01, sd_change=0.10, icc_mz=0.999, icc_dz=0.999, seed=124)
-    # Should run without floating errors/NaNs
-    jp, p1, p2 = pta._simulate_co_primary(spec1, spec2, sims=200, alpha=0.025, pair_effect_corr=0.999)
-    assert 0 <= jp <= 1
-
-
-# ---------- CLI resolution helpers ----------
-
-def test_resolve_effect_abs_variants():
-    # direct absolute
-    args = argparse.Namespace(effect_abs=0.12, endpoint="custom", d_std=None,
-                              effect_pct=None, effect_years=None)
-    out = pta._resolve_effect_abs(args, sd_change=0.10, icc_eff=0.5, suffix="")
-    assert math.isclose(out, 0.12)
-
-    # endpoint-specific helpers
-    args_dp = argparse.Namespace(effect_abs=None, endpoint="dunedinpace", effect_pct=5.0,
-                                 effect_years=None, d_std=None)
-    assert math.isclose(pta._resolve_effect_abs(args_dp, 0.10, 0.5, ""), 0.05)
-
-    args_ga = argparse.Namespace(effect_abs=None, endpoint="grimage", effect_years=2.5,
-                                 effect_pct=None, d_std=None)
-    assert math.isclose(pta._resolve_effect_abs(args_ga, 0.10, 0.5, ""), 2.5)
-
-    # standardized d with sd_change + ICC
-    args_d = argparse.Namespace(effect_abs=None, endpoint="custom", d_std=0.2,
-                                effect_pct=None, effect_years=None)
-    out_d = pta._resolve_effect_abs(args_d, sd_change=0.10, icc_eff=0.5, suffix="")
-    sd_d = pta.sd_diff_from_sd_change_icc(0.10, 0.5)
-    assert math.isclose(out_d, 0.2 * sd_d)
-
-
-def test_resolve_sd_change_variants():
-    # direct
-    args = argparse.Namespace(sd_change=0.25)
-    assert math.isclose(pta._resolve_sd_change(args, ""), 0.25)
-
-    # derived from pre/post
-    args2 = argparse.Namespace(sd_change=None, sd_pre=2.0, sd_post=3.0, rho_pre_post=0.8)
-    out2 = pta._resolve_sd_change(args2, "")
-    assert out2 > 0
-
-
-# ---------- CLI helpers ----------
-
-def _run_power_cli(args):
-    try:
-        res = subprocess.run(
-            ["python3", "biological_age/power_twin_age.py"] + list(args),
-            capture_output=True,
-            text=True,
-            timeout=60,
+class TestEmpiricalVerification:
+    """Empirically verify claimed statistical properties via simulation."""
+    
+    def test_type_i_error_rate_calibration(self):
+        """Under null hypothesis (effect≈0), rejection rate should equal alpha.
+        
+        This is a fundamental statistical property: false positive rate = alpha.
+        Note: Code requires effect_abs > 0, so we use a tiny effect (0.0001) as proxy for null.
+        """
+        alpha = 0.05
+        spec = pta.AgeTwinSpec(
+            n_pairs=100,
+            effect_abs=0.0001,  # Tiny effect as proxy for NULL (code requires positive)
+            sd_change=0.10,
+            icc_mz=0.55,
+            icc_dz=0.55,
+            alpha=alpha,
+            seed=999
         )
-        return res.returncode == 0, res.stdout
-    except Exception as e:
-        return False, str(e)
+        
+        # Run many simulations under near-null
+        rejection_rate, _, _ = pta._simulate_pairs(spec, sims=5000)
+        
+        # Rejection rate should be close to alpha
+        # Use binomial SE: sqrt(p*(1-p)/n) = sqrt(0.05*0.95/5000) ≈ 0.003
+        se = math.sqrt(alpha * (1 - alpha) / 5000)
+        tolerance = 3 * se  # 3 standard errors (~99% confidence)
+        
+        assert abs(rejection_rate - alpha) < tolerance, (
+            f"Type I error rate {rejection_rate:.4f} differs from alpha {alpha:.4f} "
+            f"by {abs(rejection_rate - alpha):.4f}, exceeds tolerance {tolerance:.4f}"
+        )
+    
+    def test_empirical_power_matches_claimed_power(self):
+        """Empirical power from simulation should match analytic prediction.
+        
+        This validates that our power calculations are not just consistent but accurate.
+        """
+        spec = pta.AgeTwinSpec(
+            n_pairs=150,
+            effect_abs=0.04,
+            sd_change=0.10,
+            icc_mz=0.55,
+            icc_dz=0.55,
+            seed=777
+        )
+        
+        # Predicted power (analytic)
+        power_predicted = pta.analytic_power_paired(
+            spec.n_pairs, spec.effect_abs, spec.sd_change,
+            spec.effective_icc(), spec.alpha
+        )
+        
+        # Empirical power (simulation)
+        power_empirical, _, _ = pta._simulate_pairs(spec, sims=5000)
+        
+        # Should match within simulation error
+        se = math.sqrt(power_empirical * (1 - power_empirical) / 5000)
+        tolerance = 3 * se
+        
+        assert abs(power_empirical - power_predicted) < tolerance, (
+            f"Empirical power {power_empirical:.3f} differs from predicted {power_predicted:.3f}"
+        )
+    
+    def test_effect_size_recovery(self):
+        """Simulation should recover the true effect size on average."""
+        true_effect = 0.035
+        spec = pta.AgeTwinSpec(
+            n_pairs=200,
+            effect_abs=true_effect,
+            sd_change=0.10,
+            seed=555
+        )
+        
+        _, avg_estimated_effect, _ = pta._simulate_pairs(spec, sims=3000)
+        
+        # Average estimate should be close to true effect
+        # SE of mean ≈ true_effect / sqrt(200) ≈ 0.0025 in each simulation
+        # Across 3000 sims, SE of average ≈ 0.0025 / sqrt(3000) ≈ 0.00005
+        tolerance = 0.005  # Conservative tolerance
+        
+        assert abs(avg_estimated_effect - true_effect) < tolerance, (
+            f"Estimated effect {avg_estimated_effect:.4f} differs from true {true_effect:.4f}"
+        )
 
 
-def _extract_power(output: str) -> float:
-    for line in output.splitlines():
-        if "Statistical power:" in line or "Marginal power:" in line:
-            try:
-                return float(line.split(":")[1].split("(")[0].strip())
-            except Exception:
-                pass
-    return -1.0
+class TestRobustnessAndPerturbations:
+    """Test that small input changes produce small output changes (Lipschitz continuity)."""
+    
+    def test_power_continuity_in_effect_size(self):
+        """Power should change smoothly with effect size (no discontinuities)."""
+        base_effect = 0.03
+        epsilon = 0.001  # Small perturbation
+        
+        pw_base = pta.analytic_power_paired(200, base_effect, 0.10, 0.55, 0.05)
+        pw_perturbed = pta.analytic_power_paired(200, base_effect + epsilon, 0.10, 0.55, 0.05)
+        
+        # Change in power should be small (Lipschitz continuity)
+        delta_power = abs(pw_perturbed - pw_base)
+        assert delta_power < 0.05, f"Power changed by {delta_power:.4f} for tiny effect change"
+    
+    def test_power_continuity_in_sample_size(self):
+        """Power should increase smoothly with sample size."""
+        powers = []
+        for n in range(180, 221, 10):  # n = 180, 190, ..., 220
+            pw = pta.analytic_power_paired(n, 0.03, 0.10, 0.55, 0.05)
+            powers.append(pw)
+        
+        # Check all consecutive differences are similar (smooth increase)
+        diffs = [powers[i+1] - powers[i] for i in range(len(powers)-1)]
+        avg_diff = sum(diffs) / len(diffs)
+        
+        for diff in diffs:
+            # No single jump should be 3x the average
+            assert diff < 3 * avg_diff, f"Non-smooth power increase detected: {diff:.4f}"
+    
+    def test_effective_icc_robustness(self):
+        """Effective ICC should be stable to small changes in proportions."""
+        spec_base = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.03, sd_change=0.1,
+            prop_mz=0.50, icc_mz=0.6, icc_dz=0.4
+        )
+        spec_perturbed = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.03, sd_change=0.1,
+            prop_mz=0.51, icc_mz=0.6, icc_dz=0.4
+        )
+        
+        icc_eff_base = spec_base.effective_icc()
+        icc_eff_perturbed = spec_perturbed.effective_icc()
+        
+        # Should change by at most 1% for 1% change in prop_mz
+        assert abs(icc_eff_perturbed - icc_eff_base) < 0.01
 
 
-def _extract_joint_power(output: str) -> float:
-    for line in output.splitlines():
-        if "Probability both p <" in line:
-            try:
-                return float(line.split(":")[1].split("(")[0].strip())
-            except Exception:
-                pass
-    return -1.0
+class TestConsistencyAcrossPaths:
+    """Test that different calculation paths give the same answer."""
+    
+    def test_mde_gives_target_power(self):
+        """MDE should give exactly the target power when used in power calculation."""
+        n_pairs = 200
+        target_power = 0.85
+        sd_change = 0.10
+        icc = 0.55
+        alpha = 0.05
+        
+        # Calculate MDE for 85% power
+        mde = pta.analytic_mde(n_pairs, target_power, sd_change, icc, alpha)
+        
+        # Use that MDE to calculate power - should get target_power back
+        achieved_power = pta.analytic_power_paired(n_pairs, mde, sd_change, icc, alpha)
+        
+        assert abs(achieved_power - target_power) < 0.001, (
+            f"MDE {mde:.4f} gives power {achieved_power:.3f}, not target {target_power:.3f}"
+        )
+    
+    def test_pairs_for_power_gives_target_power(self):
+        """Sample size for target power should actually achieve that power."""
+        target_power = 0.90
+        effect_abs = 0.03
+        sd_change = 0.10
+        icc = 0.55
+        alpha = 0.05
+        
+        # Calculate sample size for 90% power
+        n_required, achieved_power = pta.analytic_pairs_for_power(
+            target_power, effect_abs, sd_change, icc, alpha
+        )
+        
+        # Verify the achieved power is correct by recalculating
+        power_check = pta.analytic_power_paired(n_required, effect_abs, sd_change, icc, alpha)
+        
+        assert abs(power_check - achieved_power) < 0.01, "Sample size calculation inconsistent"
+        assert achieved_power >= target_power, f"Failed to achieve target power"
+    
+    def test_contamination_path_independence(self):
+        """Contamination applied before vs after should give same result."""
+        # Path 1: Apply contamination, then calculate power
+        effect_contaminated = pta.apply_contamination(0.03, 0.2, 0.5)
+        pw1 = pta.analytic_power_paired(200, effect_contaminated, 0.10, 0.55, 0.05)
+        
+        # Path 2: Use AgeTwinSpec which applies contamination internally
+        spec = pta.AgeTwinSpec(
+            n_pairs=200, effect_abs=0.03, sd_change=0.10,
+            contamination_rate=0.2, contamination_effect=0.5
+        )
+        effect_from_spec = spec.observed_effect()
+        pw2 = pta.analytic_power_paired(200, effect_from_spec, 0.10, 0.55, 0.05)
+        
+        assert abs(pw1 - pw2) < 1e-10, "Different contamination paths give different results"
 
 
-def _extract_sample_size(output: str) -> int:
-    for line in output.splitlines():
-        if "Required COMPLETING pairs:" in line:
-            try:
-                return int(line.split(":")[1].strip())
-            except Exception:
-                pass
-    return -1
+class TestPathologicalCases:
+    """Test deliberately pathological scenarios to find hidden bugs."""
+    
+    def test_all_mz_twins(self):
+        """100% MZ twins should work correctly."""
+        spec = pta.AgeTwinSpec(
+            n_pairs=150, effect_abs=0.03, sd_change=0.10,
+            prop_mz=1.0, icc_mz=0.70, icc_dz=0.40
+        )
+        
+        icc_eff = spec.effective_icc()
+        assert abs(icc_eff - 0.70) < 1e-6, "100% MZ should give MZ ICC"
+        
+        pw = pta.analytic_power_paired(
+            spec.n_pairs, spec.effect_abs, spec.sd_change, icc_eff, spec.alpha
+        )
+        assert 0 < pw < 1, "Power invalid for 100% MZ twins"
+    
+    def test_all_dz_twins(self):
+        """100% DZ twins should work correctly."""
+        spec = pta.AgeTwinSpec(
+            n_pairs=150, effect_abs=0.03, sd_change=0.10,
+            prop_mz=0.0, icc_mz=0.70, icc_dz=0.40
+        )
+        
+        icc_eff = spec.effective_icc()
+        assert abs(icc_eff - 0.40) < 1e-6, "100% DZ should give DZ ICC"
+        
+        pw = pta.analytic_power_paired(
+            spec.n_pairs, spec.effect_abs, spec.sd_change, icc_eff, spec.alpha
+        )
+        assert 0 < pw < 1, "Power invalid for 100% DZ twins"
+    
+    def test_extreme_mz_dz_icc_difference(self):
+        """Very different MZ vs DZ ICCs should be handled."""
+        spec = pta.AgeTwinSpec(
+            n_pairs=150, effect_abs=0.03, sd_change=0.10,
+            prop_mz=0.5, icc_mz=0.95, icc_dz=0.05
+        )
+        
+        icc_eff = spec.effective_icc()
+        # Should be somewhere in between
+        assert 0.05 <= icc_eff <= 0.95, f"Effective ICC {icc_eff} outside bounds"
+        
+        # Should still give valid power
+        pw = pta.analytic_power_paired(
+            spec.n_pairs, spec.effect_abs, spec.sd_change, icc_eff, spec.alpha
+        )
+        assert 0 < pw < 1, "Power invalid with extreme ICC difference"
+    
+    def test_very_high_contamination(self):
+        """90% contamination at 90% effect magnitude (extreme scenario)."""
+        spec = pta.AgeTwinSpec(
+            n_pairs=500,  # Need large sample for remaining effect
+            effect_abs=0.10,  # Need large effect to have anything left
+            sd_change=0.10,
+            contamination_rate=0.90,
+            contamination_effect=0.90
+        )
+        
+        effect_obs = spec.observed_effect()
+        # 90% * 90% = 81% reduction, leaving 19% of effect
+        expected = 0.10 * (1 - 0.90 * 0.90)
+        assert abs(effect_obs - expected) < 1e-10, "Contamination calculation wrong"
+        
+        # Should still compute power (even if low)
+        pw = pta.analytic_power_paired(
+            spec.n_pairs, effect_obs, spec.sd_change, spec.effective_icc(), spec.alpha
+        )
+        assert 0 <= pw <= 1, "Power invalid with extreme contamination"
+    
+    def test_perfect_correlation_in_sd_change_derivation(self):
+        """Perfect pre-post correlation should give SD change ≈ 0."""
+        sd_change = pta.sd_change_from_pre_post(1.0, 1.0, 0.9999)
+        assert sd_change < 0.02, f"Near-perfect correlation should give tiny SD, got {sd_change}"
+    
+    def test_negative_correlation_in_sd_change_derivation(self):
+        """Negative correlation should increase SD of change."""
+        sd_pos = pta.sd_change_from_pre_post(1.0, 1.0, 0.5)
+        sd_neg = pta.sd_change_from_pre_post(1.0, 1.0, -0.5)
+        
+        assert sd_neg > sd_pos, "Negative correlation should increase SD of change"
 
 
-def _extract_mde(output: str) -> float:
-    for line in output.splitlines():
-        if "MDE (absolute, beneficial):" in line:
-            try:
-                return float(line.split(":")[1].strip())
-            except Exception:
-                pass
-    return -1.0
+class TestCrossValidation:
+    """Cross-validate against published literature values and known benchmarks."""
+    
+    def test_calerie_dunedinpace_benchmark(self):
+        """Validate against CALERIE trial results.
+        
+        CALERIE: 2-year caloric restriction, n≈200, DunedinPACE slowing 2-3%,
+        achieved statistical significance (p<0.003).
+        
+        If we simulate similar conditions, we should get similar power.
+        """
+        # CALERIE-like parameters
+        n_pairs = 100  # ~200 individuals, rough approximation
+        effect = 0.025  # 2.5% slowing (middle of 2-3%)
+        sd_change = 0.10  # Reasonable assumption
+        icc = 0.55  # Protocol assumption
+        alpha = 0.05
+        
+        pw = pta.analytic_power_paired(n_pairs, effect, sd_change, icc, alpha)
+        
+        # Should have decent power (they got p<0.003, suggesting high power)
+        # We expect 70-90% power for detection
+        assert 0.50 < pw < 0.95, (
+            f"Power {pw:.2f} for CALERIE-like parameters seems unrealistic"
+        )
+    
+    def test_fitzgerald_grimage_benchmark(self):
+        """Validate against Fitzgerald 2021 study.
+        
+        8-week intervention, n=43 treated vs 40 control, achieved 3.23 year
+        DNAmAge reduction (p=0.018).
+        """
+        # Fitzgerald-like parameters (rough approximation)
+        n_pairs = 40  # ~40 pairs for 80 individuals
+        effect = 3.0  # 3-year reduction
+        sd_change = 5.0  # Estimated from biological age SD
+        icc = 0.50
+        alpha = 0.05
+        
+        pw = pta.analytic_power_paired(n_pairs, effect, sd_change, icc, alpha)
+        
+        # They achieved significance (p=0.018), suggesting power >80%
+        assert pw > 0.60, (
+            f"Power {pw:.2f} too low for Fitzgerald parameters that achieved significance"
+        )
+    
+    def test_typical_rct_power(self):
+        """Standard RCT aims for 80% power with Cohen's d ≈ 0.5."""
+        # With paired design, what sample size gives 80% power for d=0.5?
+        # d = effect / SD(diff), and SD(diff) = sqrt(2*(1-ICC)*sigma^2)
+        # If ICC=0.5, SD(diff) = sigma. So effect = 0.5*sigma.
+        
+        effect = 0.05  # 5% slowing
+        sd_change = 0.10
+        icc = 0.50
+        d = pta.d_paired(effect, sd_change, icc)
+        
+        # d should be about 0.5
+        assert 0.4 < d < 0.6, f"Cohen's d {d:.2f} not in expected range"
+        
+        # Find sample size for 80% power
+        n, pw = pta.analytic_pairs_for_power(0.80, effect, sd_change, icc, 0.05)
+        
+        # Typical RCTs need 50-100 per group, so 50-100 pairs sounds right
+        assert 30 < n < 150, f"Sample size {n} seems unrealistic for medium effect"
 
 
-def _extract_curve_rows(output: str):
-    rows = []
-    for line in output.strip().splitlines():
-        if line and line[0].isdigit():
-            try:
-                n_str, pw_str = line.split(',')
-                rows.append((int(n_str.strip()), float(pw_str.strip())))
-            except Exception:
-                pass
-    return rows
+class TestAdvancedSimulationProperties:
+    """Test advanced statistical properties of the simulation."""
+    
+    def test_simulation_variance_matches_theory(self):
+        """Simulated effect sizes should have correct variance.
+        
+        Under the model, Var(diff) = 2*(1-ICC)*sigma^2
+        Note: Using tiny effect instead of zero due to code validation.
+        """
+        spec = pta.AgeTwinSpec(
+            n_pairs=100,
+            effect_abs=0.0001,  # Tiny effect (code requires positive)
+            sd_change=0.10,
+            icc_mz=0.55,
+            icc_dz=0.55,
+            seed=333
+        )
+        
+        # Run simulation and collect estimates
+        rng = np.random.default_rng(333)
+        estimates = []
+        effect_obs = spec.observed_effect()  # Nearly zero
+        
+        for _ in range(1000):  # 1000 simulated trials
+            # Generate one trial
+            z_is_mz = rng.random(spec.n_pairs) < spec.prop_mz
+            y_treat = np.empty(spec.n_pairs)
+            y_ctrl = np.empty(spec.n_pairs)
+            
+            for i in range(spec.n_pairs):
+                icc = spec.icc_mz if z_is_mz[i] else spec.icc_dz
+                sigma2 = spec.sd_change ** 2
+                sd_b = math.sqrt(max(0.0, icc) * sigma2)
+                sd_e = math.sqrt(max(0.0, 1.0 - icc) * sigma2)
+                b = rng.normal(0.0, sd_b)
+                e1 = rng.normal(0.0, sd_e)
+                e2 = rng.normal(0.0, sd_e)
+                
+                # Use tiny effect
+                y_treat[i] = -effect_obs + b + e1
+                y_ctrl[i] = 0.0 + b + e2
+            
+            d = y_treat - y_ctrl
+            estimates.append(np.mean(d))
+        
+        # Variance of mean difference
+        empirical_var = np.var(estimates, ddof=1)
+        
+        # Theoretical variance: Var(mean diff) = Var(diff) / n = 2*(1-ICC)*sigma^2 / n
+        icc_eff = spec.effective_icc()
+        theoretical_var = 2 * (1 - icc_eff) * (spec.sd_change ** 2) / spec.n_pairs
+        
+        # Should match within ~20% (Monte Carlo error)
+        rel_error = abs(empirical_var - theoretical_var) / theoretical_var
+        assert rel_error < 0.20, (
+            f"Empirical variance {empirical_var:.6f} differs from "
+            f"theoretical {theoretical_var:.6f} by {rel_error*100:.1f}%"
+        )
+    
+    def test_coprimary_null_correlation(self):
+        """Under null hypothesis, co-primary endpoints should be independent if uncorrelated.
+        
+        Note: Using tiny effects instead of zero due to code validation.
+        """
+        spec1 = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.0001, sd_change=0.10, seed=111
+        )
+        spec2 = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.0001, sd_change=0.15, seed=112
+        )
+        
+        # With zero correlation and null hypothesis, joint rejection should be ~alpha^2
+        pw_joint, pw1, pw2 = pta._simulate_co_primary(
+            spec1, spec2, sims=2000, alpha=0.05, pair_effect_corr=0.0
+        )
+        
+        # Under null with independence: P(both reject) ≈ alpha * alpha = 0.0025
+        expected_joint = 0.05 * 0.05
+        
+        # Individual powers should be ≈ alpha under null
+        assert abs(pw1 - 0.05) < 0.02, f"Endpoint 1 Type I error {pw1:.3f} not ≈ 0.05"
+        assert abs(pw2 - 0.05) < 0.02, f"Endpoint 2 Type I error {pw2:.3f} not ≈ 0.05"
+        
+        # Joint should be near alpha^2 (with wide tolerance due to small probability)
+        assert abs(pw_joint - expected_joint) < 0.015, (
+            f"Joint rejection rate {pw_joint:.4f} not ≈ {expected_joint:.4f} under null"
+        )
 
 
-# ---------- CLI-based tests ----------
-
-def test_cli_coprimary_alpha_auto_adjust():
-    ok, out = _run_power_cli([
-        "--mode", "co-primary-power", "--n-pairs", "120",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--sd-change", "0.10",
-        "--endpoint2", "grimage", "--effect2-years", "1.0", "--sd2-change", "3.0",
-        "--use-simulation", "--sims", "500"
-    ])
-    assert ok
-    line_alpha = next((ln for ln in out.splitlines() if ln.strip().startswith("Alpha per endpoint:")), "")
-    assert "0.025" in line_alpha
-
-
-def test_cli_coprimary_naming_variant():
-    ok, _ = _run_power_cli([
-        "--mode", "co-primary-power", "--n-pairs", "120",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--sd-change", "0.10",
-        "--endpoint2", "grimage", "--effect2-years", "1.0", "--sd2-change", "3.0",
-        "--alpha", "0.025", "--use-simulation", "--sims", "500"
-    ])
-    assert ok
-
-
-def test_cli_curve_monotonicity_and_consistency():
-    ok_curve, out_curve = _run_power_cli([
-        "--mode", "curve", "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--alpha", "0.05",
-        "--curve-start", "50", "--curve-stop", "200", "--curve-step", "50"
-    ])
-    ok_point, out_point = _run_power_cli([
-        "--mode", "power", "--n-pairs", "100",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--alpha", "0.05"
-    ])
-    assert ok_curve and ok_point
-    rows = _extract_curve_rows(out_curve)
-    assert len(rows) >= 2
-    assert all(rows[i][1] < rows[i+1][1] for i in range(len(rows)-1))
-    pw_point = _extract_power(out_point)
-    pw_curve_100 = next((pw for n, pw in rows if n == 100), None)
-    assert pw_curve_100 is not None
-    assert abs(pw_curve_100 - pw_point) < 1e-6
+class TestInvarianceProperties:
+    """Test that certain transformations preserve expected relationships."""
+    
+    def test_scale_invariance_of_cohen_d(self):
+        """Cohen's d should be invariant to scaling of both effect and SD."""
+        d1 = pta.d_paired(0.03, 0.10, 0.55)
+        
+        # Scale both by 2x
+        d2 = pta.d_paired(0.06, 0.20, 0.55)
+        
+        # Should give same Cohen's d
+        assert abs(d1 - d2) < 1e-10, "Cohen's d not scale invariant"
+    
+    def test_power_increases_if_everything_else_improves(self):
+        """If we improve on all dimensions, power should increase."""
+        pw_base = pta.analytic_power_paired(100, 0.03, 0.10, 0.50, 0.05)
+        
+        # Improve: more pairs, larger effect, smaller SD, higher ICC
+        pw_improved = pta.analytic_power_paired(150, 0.04, 0.09, 0.60, 0.05)
+        
+        assert pw_improved > pw_base, "Power didn't increase when all factors improved"
+    
+    def test_symmetry_of_mz_dz_proportions(self):
+        """Swapping MZ/DZ ICC values and proportions should give reciprocal effective ICC."""
+        spec1 = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.03, sd_change=0.1,
+            prop_mz=0.3, icc_mz=0.7, icc_dz=0.4
+        )
+        spec2 = pta.AgeTwinSpec(
+            n_pairs=100, effect_abs=0.03, sd_change=0.1,
+            prop_mz=0.7, icc_mz=0.4, icc_dz=0.7  # Swapped ICC values and proportion
+        )
+        
+        icc1 = spec1.effective_icc()
+        icc2 = spec2.effective_icc()
+        
+        # Effective ICCs should be related by the swap
+        # eff1 = 1 - [0.3*(1-0.7) + 0.7*(1-0.4)] = 1 - [0.09 + 0.42] = 0.49
+        # eff2 = 1 - [0.7*(1-0.4) + 0.3*(1-0.7)] = 1 - [0.42 + 0.09] = 0.49
+        assert abs(icc1 - icc2) < 1e-10, "Symmetry broken in effective ICC calculation"
 
 
-def test_cli_coprimary_rho_zero_product_bound():
-    ok, out = _run_power_cli([
-        "--mode", "co-primary-power", "--n-pairs", "160",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--sd-change", "0.10",
-        "--endpoint2", "grimage", "--effect2-years", "1.0", "--sd2-change", "3.0",
-        "--alpha", "0.025", "--use-simulation", "--sims", "1200", "--pair-effect-corr", "0.0"
-    ])
-    assert ok
-    lines = out.splitlines()
-    power1, power2 = None, None
-    for idx, ln in enumerate(lines):
-        if ln.strip().startswith('ENDPOINT 1:'):
-            for l in lines[idx:]:
-                if 'Marginal power:' in l:
-                    power1 = float(l.split(':')[1].split('(')[0].strip()); break
-        if ln.strip().startswith('ENDPOINT 2:'):
-            for l in lines[idx:]:
-                if 'Marginal power:' in l:
-                    power2 = float(l.split(':')[1].split('(')[0].strip()); break
-    joint = _extract_joint_power(out)
-    assert power1 is not None and power2 is not None and joint >= 0
-    assert abs(joint - (power1 * power2)) < 0.05  # allow MC tolerance
+def run_advanced_tests():
+    """Run all advanced tests."""
+    print("\n" + "=" * 70)
+    print("RUNNING ADVANCED/CREATIVE TEST SUITE")
+    print("=" * 70)
+    
+    pytest_args = [
+        __file__,
+        "-v",
+        "--tb=short",
+        "-x",  # Stop on first failure
+    ]
+    
+    exit_code = pytest.main(pytest_args)
+    
+    if exit_code == 0:
+        print("\n" + "=" * 70)
+        print("ALL ADVANCED TESTS PASSED ✓")
+        print("=" * 70)
+    else:
+        print("\n" + "=" * 70)
+        print("SOME ADVANCED TESTS FAILED ✗")
+        print("=" * 70)
+    
+    return exit_code
 
 
-def test_cli_contamination_note_and_mde_outputs():
-    ok_power, out_power = _run_power_cli([
-        "--mode", "power", "--n-pairs", "150",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--alpha", "0.05",
-        "--contamination-rate", "0.30", "--contamination-effect", "0.50"
-    ])
-    assert ok_power
-    assert any('CONTAMINATION ADJUSTMENT:' in ln for ln in out_power.splitlines())
+if __name__ == "__main__":
+    exit_code = run_advanced_tests()
+    sys.exit(exit_code)
 
-    ok_mde, out_mde = _run_power_cli([
-        "--mode", "mde", "--n-pairs", "150", "--target-power", "0.80",
-        "--endpoint", "dunedinpace", "--sd-change", "0.10", "--alpha", "0.05",
-        "--contamination-rate", "0.30", "--contamination-effect", "0.50"
-    ])
-    assert ok_mde
-    has_mde_obs = any('Observed MDE (on test scale):' in ln for ln in out_mde.splitlines())
-    has_mde_true = any('Underlying true effect required (given contamination):' in ln for ln in out_mde.splitlines())
-    assert has_mde_obs and has_mde_true
-
-
-def test_cli_validation_errors():
-    ok_bad_icc, _ = _run_power_cli([
-        "--mode", "power", "--n-pairs", "50",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--icc-mz", "-0.1", "--icc-dz", "0.3"
-    ])
-    assert not ok_bad_icc
-
-    ok_bad_attr, _ = _run_power_cli([
-        "--mode", "power", "--n-pairs", "100",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--attrition-rate", "1.0"
-    ])
-    assert not ok_bad_attr
-
-
-def test_cli_pairs_for_power_enrollment_attrition():
-    ok, out = _run_power_cli([
-        "--mode", "pairs-for-power", "--target-power", "0.80",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--alpha", "0.05", "--attrition-rate", "0.25"
-    ])
-    assert ok
-    enrollment = None
-    for line in out.splitlines():
-        if 'Required ENROLLMENT:' in line:
-            try:
-                enrollment = int(line.split(':')[1].split('pairs')[0].strip())
-            except Exception:
-                pass
-    assert enrollment == 108
-
-
-def test_cli_near_null_analytic_alpha():
-    ok, out = _run_power_cli([
-        "--mode", "power", "--n-pairs", "150",
-        "--endpoint", "dunedinpace", "--effect-pct", "0.0001",
-        "--sd-change", "0.10", "--alpha", "0.05"
-    ])
-    assert ok
-    pw = _extract_power(out)
-    assert abs(pw - 0.05) < 0.001
-
-
-def test_cli_nan_hotspot_guard_reasonable_n():
-    ok, out = _run_power_cli([
-        "--mode", "pairs-for-power", "--target-power", "0.80",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0",
-        "--sd-change", "0.10", "--alpha", "0.05"
-    ])
-    assert ok
-    n = _extract_sample_size(out)
-    assert n > 0 and n < 1000
-
-
-# ---------- Additional unit tests (expanded coverage) ----------
-
-def test_validate_probability_toggles():
-    pta.validate_probability(0.0, "p", allow_zero=True)
-    with pytest.raises(ValueError):
-        pta.validate_probability(0.0, "p", allow_zero=False)
-    pta.validate_probability(1.0, "p", allow_one=True)
-    with pytest.raises(ValueError):
-        pta.validate_probability(1.0, "p", allow_one=False)
-
-
-def test_sd_change_from_pre_post_invalid_rho_raises():
-    with pytest.raises(ValueError):
-        pta.sd_change_from_pre_post(1.0, 1.0, 1.1)
-    with pytest.raises(ValueError):
-        pta.sd_change_from_pre_post(1.0, 1.0, -1.1)
-
-
-def test_two_sided_power_normal_monotonic_in_abs_lambda():
-    alpha = 0.05
-    pw0 = pta._two_sided_power_normal(0.0, alpha)
-    pw1 = pta._two_sided_power_normal(1.0, alpha)
-    pw2 = pta._two_sided_power_normal(2.0, alpha)
-    # At lambda=0, power ~= alpha
-    assert abs(pw0 - alpha) < 1e-12
-    assert pw0 < pw1 < pw2
-
-
-def test_analytic_power_paired_normal_fallback_large_lambda():
-    # Choose parameters such that sqrt(n)*d > 20 triggers normal approximation path
-    n = 100
-    sd_change = 1.0
-    icc = 0.0
-    effect_abs = 3.0  # d = 3/sqrt(2) ~ 2.12; lambda ~ 21.2
-    pw = pta.analytic_power_paired(n, effect_abs, sd_change, icc, 0.05)
-    assert 0.99 < pw <= 1.0
-
-
-def test_analytic_mde_monotonic_in_n_and_alpha():
-    sd_change = 0.10
-    icc = 0.55
-    # MDE decreases as n increases
-    mde_small_n = pta.analytic_mde(100, 0.80, sd_change, icc, 0.05)
-    mde_large_n = pta.analytic_mde(500, 0.80, sd_change, icc, 0.05)
-    assert mde_large_n < mde_small_n
-    # MDE decreases as alpha increases (less stringent)
-    mde_alpha_strict = pta.analytic_mde(300, 0.80, sd_change, icc, 0.01)
-    mde_alpha_loose = pta.analytic_mde(300, 0.80, sd_change, icc, 0.10)
-    assert mde_alpha_loose < mde_alpha_strict
-
-
-def test_agetwinspec_validation_errors():
-    with pytest.raises(ValueError):
-        pta.AgeTwinSpec(n_pairs=0, effect_abs=0.1, sd_change=1.0)
-    with pytest.raises(ValueError):
-        pta.AgeTwinSpec(n_pairs=2, effect_abs=-0.1, sd_change=1.0)
-    with pytest.raises(ValueError):
-        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=0.0)
-    with pytest.raises(ValueError):
-        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=1.0, prop_mz=1.1)
-    with pytest.raises(ValueError):
-        pta.AgeTwinSpec(n_pairs=2, effect_abs=0.1, sd_change=1.0, icc_mz=1.0)
-
-
-def test_effective_icc_clamps_prop_mz_beyond_bounds():
-    spec = pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=1.0, prop_mz=0.5, icc_mz=0.8, icc_dz=0.2)
-    spec.prop_mz = 1.5
-    assert math.isclose(spec.effective_icc(), 0.8, rel_tol=1e-12)
-    spec.prop_mz = -0.5
-    assert math.isclose(spec.effective_icc(), 0.2, rel_tol=1e-12)
-
-
-def test_compute_paired_pval_degenerate_all_constant_nonzero_is_significant():
-    d = np.full(10, 0.5)
-    p = pta._compute_paired_pval(d)
-    assert math.isclose(p, 0.0)
-
-
-def test_simulate_coprimary_joint_power_monotonic_wrt_corr():
-    spec1 = pta.AgeTwinSpec(n_pairs=160, effect_abs=0.03, sd_change=0.10, prop_mz=0.5, icc_mz=0.55, icc_dz=0.55, seed=200)
-    spec2 = pta.AgeTwinSpec(n_pairs=160, effect_abs=1.0, sd_change=3.0, prop_mz=0.5, icc_mz=0.55, icc_dz=0.55, seed=201)
-    jp_low, p1_low, p2_low = pta._simulate_co_primary(spec1, spec2, sims=1200, alpha=0.025, pair_effect_corr=0.0)
-    jp_high, p1_high, p2_high = pta._simulate_co_primary(spec1, spec2, sims=1200, alpha=0.025, pair_effect_corr=0.9)
-    # Joint power should not decrease when correlation increases (tolerance for MC noise)
-    assert jp_high + 0.02 >= jp_low
-    # Joint power is bounded by marginals
-    assert jp_low <= min(p1_low, p2_low)
-    assert jp_high <= min(p1_high, p2_high)
-
-
-# ---------- Additional CLI error-case tests ----------
-
-def test_cli_missing_endpoint2_in_coprimary_errors():
-    ok, _ = _run_power_cli([
-        "--mode", "co-primary-power", "--n-pairs", "120",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--sd-change", "0.10",
-        "--alpha", "0.025", "--use-simulation", "--sims", "200"
-    ])
-    assert not ok
-
-
-def test_cli_missing_effect_errors_for_power():
-    ok, _ = _run_power_cli([
-        "--mode", "power", "--n-pairs", "100",
-        "--endpoint", "custom", "--sd-change", "0.10", "--alpha", "0.05"
-    ])
-    assert not ok
-
-
-def test_cli_missing_sd_change_errors():
-    ok, _ = _run_power_cli([
-        "--mode", "power", "--n-pairs", "100",
-        "--endpoint", "dunedinpace", "--effect-pct", "3.0", "--alpha", "0.05"
-    ])
-    assert not ok

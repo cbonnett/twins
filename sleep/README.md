@@ -1,22 +1,19 @@
-# SIESTA-LLM — Sleep ISI Twin-Aware Power Analysis
+# Twin-Aware Power — Sleep / ISI Module
 
-The sleep module simulates an individually randomized RCT with a high proportion of twins (both monozygotic and dizygotic).
-Within-pair correlation is explicitly modeled, enabling realistic power and sample-size planning for the Insomnia Severity Index
-(ISI) change at Week 8.
+Monte Carlo power analysis for an individually randomized insomnia trial that includes a large
+fraction of twins. The module models zygosity-specific ICCs, contamination, attrition, and optional
+MixedLM analysis so protocol teams can evaluate design trade-offs for Insomnia Severity Index (ISI)
+change scores.
 
+## Files
 
-## Contents
-
-- `power_twin_sleep.py` — Monte Carlo engine + CLI
-- `raw_sleep_design.md` — design notes
-- `README.md` — this documentation
-
-The unified Streamlit UI lives at the repository root (`streamlit_app.py`) and includes a Sleep (ISI) panel.
-
+- `power_twin_sleep.py` – Monte Carlo simulator + CLI.
+- `raw_sleep_design.md` – additional design notes.
+- `README.md` – this guide.
 
 ## Installation
 
-Install dependencies from the repository root:
+Use the shared repository requirements so the biological age and sleep modules stay in sync:
 
 ```bash
 python -m venv .venv
@@ -24,125 +21,66 @@ source .venv/bin/activate
 pip install -r ../requirements.txt
 ```
 
-Or with [`uv`](https://github.com/astral-sh/uv):
+## Using the CLI
+
+Run the script from this directory (`python power_twin_sleep.py`) or from the repository root
+(`python sleep/power_twin_sleep.py`). Available modes:
+
+- `power` – estimate power for a fixed total sample size (completers).
+- `n-for-power` – solve for the smallest total `N` that meets a target power.
+
+Example invocations:
 
 ```bash
-uv venv .venv
-source .venv/bin/activate  # optional with `uv run`
-uv pip install -r ../requirements.txt
-```
+# Power at N=220 with heavy twin composition and cluster-robust analysis
+python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 \
+    --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --analysis cluster_robust \
+    --contamination-rate 0.30 --contamination-effect 0.50 --attrition-rate 0.10 --sims 2000
 
-
-## Streamlit UI
-
-Launch from the repository root and select “Sleep (ISI)” in the sidebar:
-
-```bash
-streamlit run streamlit_app.py
-```
-
-Key sidebar controls:
-
-1. Mode — estimate power at fixed `N` or solve for `N` that meets a target power.
-2. Effect size (ISI points), standard deviation of change, and alpha level.
-3. Twin structure — proportion twins vs singletons, proportion MZ, ICCs for MZ/DZ.
-4. Analysis method — cluster-robust OLS (default) or MixedLM random intercept.
-5. Monte Carlo settings — number of simulations and RNG seed.
-6. Optional contamination (rate × fraction) and attrition assumptions.
-
-Outputs include estimated power or required total `N`, contamination‑adjusted effects, attrition‑inflated enrollment counts,
-95% Monte Carlo confidence intervals for power, and Monte Carlo standard errors.
-
-
-## Command-Line
-
-The CLI mirrors the UI and is convenient for scripted sweeps or reproducible reports. You can run it from this folder as
-`python power_twin_sleep.py` or from the repository root as `python sleep/power_twin_sleep.py`.
-
-Modes:
-
-- `power` — estimate power for a fixed total sample size.
-- `n-for-power` — solve for the smallest total `N` achieving a target power.
-
-Examples:
-
-```bash
-# Power at N=200 with heavy twin composition
-python power_twin_sleep.py --mode power --n-total 200 --effect-points 6 --sd-change 7 \
-    --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --alpha 0.05 --sims 2000
-
-# Required N for 90% power
-python power_twin_sleep.py --mode n-for-power --target-power 0.90 --effect-points 6 \
+# Required N for 90% power under MixedLM analysis
+python sleep/power_twin_sleep.py --mode n-for-power --target-power 0.90 --effect-points 6 \
     --sd-change 7 --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 \
-    --alpha 0.05 --sims 1500
-
-# Include contamination and attrition considerations
-python power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 \
-    --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --alpha 0.05 --sims 2000 \
-    --contamination-rate 0.30 --contamination-effect 0.50 --attrition-rate 0.10
-
-# MixedLM analysis (falls back gracefully if statsmodels MixedLM is unavailable)
-python power_twin_sleep.py --mode power --n-total 160 --effect-points 5 --sd-change 6 \
-    --prop-twins 0.8 --prop-mz 0.5 --icc-mz 0.45 --icc-dz 0.20 --analysis mixedlm --sims 1200
+    --analysis mixedlm --sims 1500
 ```
 
 Helpful flags:
 
-- `--analysis {cluster_robust,mixedlm}` — choose estimator. MixedLM is optional and, if it fails to converge, the CLI falls back to cluster‑robust OLS.
-- `--seed` — reproducible Monte Carlo draws.
-- `--contamination-rate` / `--contamination-effect` — apply effect attenuation (`effect_obs = effect × (1 − rate × fraction)`).
-- `--attrition-rate` — compute inflated enrollment counts (power is always on completing participants).
-
+- `--analysis {cluster_robust,mixedlm}` – choose the estimator; MixedLM falls back to cluster-robust
+  OLS if fitting fails.
+- `--seed` – reproducible Monte Carlo draws.
+- `--contamination-rate` / `--contamination-effect` – attenuate the observed treatment effect.
+- `--attrition-rate` – compute inflated enrollment counts; power is always on completers.
+- `--rho-pre-post`, `--sd-pre`, `--sd-post` – derive SD(change) via `sd_change_from_pre_post` helper.
 
 ## Parameter Guidance
 
-- Effect (ISI points) — specify the beneficial magnitude. The simulation applies the sign so estimated treatment effects are negative when beneficial. MCID ≈ 6 points.
-- Standard deviation of change — typical values range from 5–7; use baseline-adjusted values if planning ANCOVA on post-ISI. Helper: `sd_change_from_pre_post(sd_pre, sd_post, rho)`.
-- Twin mix — `prop_twins` is the fraction of participants in twin pairs; `prop_mz` is the monozygotic share among twins.
-- ICCs — separate within-pair correlations by zygosity; singletons implicitly have ICC=0.
-- Alpha — two-sided test level (default 0.05).
-- Simulations (`--sims`) — more iterations reduce Monte Carlo error at the cost of runtime.
-
+- **Effect (ISI points).** Specify the beneficial magnitude (positive numbers mean larger reductions
+  for treated participants). The simulation applies the sign internally.
+- **SD of change.** Provide the change-score SD or derive it from pre/post SDs and their correlation.
+- **Twin mix.** `--prop-twins` controls the fraction of participants who are twins; `--prop-mz` is the
+  MZ share among twins.
+- **ICCs.** Separate ICCs by zygosity. Singletons implicitly have ICC=0.
+- **Alpha.** Two-sided alpha defaults to 0.05; override with `--alpha` if multiplicity adjustments
+  are required.
+- **Monte Carlo precision.** Standard error ≈ `sqrt(p·(1−p)/sims)`; increase `--sims` for decision
+  points near the power threshold.
 
 ## Outputs
 
-- Estimated power (fixed `N`) or required total sample size (`n-for-power`).
-- 95% Monte Carlo confidence interval for power.
-- Monte Carlo standard error, average estimated treatment effect, and Kish effective sample size.
-- Contamination-adjusted effect magnitude and attrition-inflated enrollment counts when those features are enabled.
+The CLI reports estimated power (or required N), 95% Monte Carlo confidence intervals, Monte Carlo
+standard errors, contamination-adjusted effect sizes, and attrition-inflated enrollment counts. MixedLM
+runs include convergence diagnostics; failures automatically fall back to cluster-robust OLS.
 
+## Streamlit UI
 
-## Assumptions & Model Notes
-
-- Individual randomization; co-twins are randomized independently.
-- Outcome model: change = treatment effect + pair random effect + residual.
-- Pair random effect variance is calibrated to match the specified ICCs; singletons omit the random effect.
-- Zygosity indicators enter the analysis model as fixed effects.
-- Normality assumed; no informative dropout beyond attrition scalar.
-
-
-## Reproducibility & Troubleshooting
-
-- Activate your virtual environment before installing requirements.
-- If `statsmodels` or MixedLM is missing, stick with `--analysis cluster_robust` (default). If MixedLM fails to converge, the CLI falls back to cluster‑robust OLS.
-- Install Streamlit separately if needed: `pip install streamlit` then run from the repo root: `streamlit run streamlit_app.py`.
-- Change the Streamlit port if 8501 is busy: `streamlit run streamlit_app.py --server.port 8502`.
-- Set `--seed` (CLI) or the UI seed slider to make Monte Carlo estimates reproducible. Increase `--sims` for final numbers.
-
-
-## Sensitivity Exploration
-
-- Vary ICCs — e.g., MZ `0.40–0.60`, DZ `0.20–0.35` — to assess robustness to correlation assumptions.
-- Explore different twin mixes; the Kish effective sample size summary highlights the design effect from clustering.
-- Adjust `sd_change` in line with expected baseline-post correlations (smaller SD means higher power at fixed `N`).
-
+`sleep` is exposed via the Sleep tab in the root `streamlit_app.py`. Launch the app with
+`streamlit run streamlit_app.py`.
 
 ## Testing
 
-Run from the repository root so subpackages are importable:
+Module-specific regression tests live in `tests/test_sleep_study.py`. Run them from the repository
+root:
 
 ```bash
-PYTHONPATH=. pytest tests/test_sleep_study.py -q
+pytest tests/test_sleep_study.py -q
 ```
-
-The suite focuses on SIESTA‑LLM protocol parameters and verifies simulation behavior, continuity, and robustness.

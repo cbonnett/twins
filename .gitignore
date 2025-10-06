@@ -87,5 +87,3 @@ Desktop.ini
 *.out
 *.err
 
-# Local requirements
-requirements.txt

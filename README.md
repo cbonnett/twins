@@ -7,6 +7,7 @@ share one interface.
 The codebase brings together:
 
 - Biological Age trial — within-pair randomized twin RCT (DunedinPACE, GrimAge, custom endpoints).
+- Biological Age trial — within-pair randomized twin RCT (DunedinPACE; custom secondary endpoint).
 - Sleep (ISI) trial — individually randomized RCT with a large twin fraction and zygosity-specific clustering.
 
 Both projects expose CLIs, and the top-level `streamlit_app.py` provides a single, unified Streamlit UI with a sidebar selector.
@@ -25,11 +26,11 @@ Both projects expose CLIs, and the top-level `streamlit_app.py` provides a singl
 │   └── README.md                 # Bio-age module docs
 ├── sleep/
 │   ├── power_twin_sleep.py       # Simulation engine + CLI
-│   ├── raw_sleep_design.md       # Design notes
 │   └── README.md                 # Sleep module docs
 └── tests/
-    ├── test_power_twin_age.py    # Regression suite for bio-age module
-    └── test_sleep_study.py       # Protocol-oriented tests for sleep module
+    ├── test_power_twin_age.py            # Regression suite for bio-age module
+    ├── test_sleep_study.py               # Protocol-oriented tests for sleep module
+    └── test_power_twin_sleep_parallel.py # Parallel determinism + search tests
 ```
 
 
@@ -104,8 +105,17 @@ python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --
 # Co‑primary biological age example
 python biological_age/power_twin_age.py --mode co-primary-power --n-pairs 700 \
   --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 \
-  --endpoint2 grimage --effect2-years 2.0 --sd2-change 3.0 \
+  --endpoint2 custom --effect2-abs 0.75 --sd2-change 3.0 \
   --use-simulation --sims 5000 --pair-effect-corr 0.8
+
+# Individual‑level (two‑sample) biological age examples
+python biological_age/power_twin_age.py --mode two-sample-power \
+  --n-per-group 150 --endpoint dunedinpace --effect-pct 2.5 --sd-change 0.10 \
+  --ancova-r2 0.50 --alpha 0.05 --attrition-rate 0.27 --deff-icc 0.50 --deff-m 2
+
+python biological_age/power_twin_age.py --mode two-sample-n-for-power \
+  --endpoint dunedinpace --effect-pct 2.5 --sd-change 0.10 --ancova-r2 0.50 \
+  --alpha 0.05 --target-power 0.80 --deff-icc 0.50 --deff-m 2 --attrition-rate 0.27
 ```
 
 Each script prints a structured summary (power, required enrollment, contamination note, etc.) suitable for reports or downstream tooling.

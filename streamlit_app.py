@@ -1,6 +1,6 @@
 """
 Unified Streamlit app: run power/sample-size calculations for
-1) Biological Age (within-pair twin RCT; DunedinPACE/GrimAge)
+1) Biological Age (within-pair twin RCT; DunedinPACE)
 2) Sleep (ISI change; individually randomized with twin mix)
 
 This app is a thin UI that calls into the existing analysis modules:
@@ -25,6 +25,9 @@ from biological_age.power_twin_age import (
     analytic_mde,
     _simulate_pairs,
     _simulate_co_primary,
+    analytic_power_two_sample,
+    analytic_n_per_group_for_power,
+    design_effect,
 )
 
 # Sleep imports
@@ -82,14 +85,12 @@ HELP_BIO = {
         "Random seed controlling the pseudo‑random draws so results are reproducible. Changing the seed changes the Monte Carlo realization but not the underlying expected power. Log the seed in your protocol or report to allow exact replication of your power numbers; use a different seed only when deliberately re‑sampling to verify stability."
     ),
     "endpoint": (
-        "Outcome scale to analyze. DunedinPACE is a unitless pace‑of‑aging index (beneficial = slower pace). GrimAge is expressed in years (beneficial = fewer years). ‘Custom’ lets you supply any absolute change scale. Choose the option that matches your scientific endpoint, reporting units, and how SD(change) is measured. Be consistent: the ‘effect’ and ‘SD of change’ must be on the same scale. If you also track standardized effects (Cohen’s d), you can convert between absolute and standardized via the paired‑difference SD shown below."
+        "Outcome scale to analyze. DunedinPACE is a unitless pace‑of‑aging index (beneficial = slower pace). ‘Custom’ lets you supply any absolute change scale. Choose the option that matches your scientific endpoint, reporting units, and how SD(change) is measured. Be consistent: the ‘effect’ and ‘SD of change’ must be on the same scale. If you also track standardized effects (Cohen’s d), you can convert between absolute and standardized via the paired‑difference SD shown below."
     ),
     "eff_abs_dpace": (
         "Absolute slowing on DunedinPACE (beneficial). For example, 0.03 means the treated twin slows aging by 3% relative to their co‑twin. Larger values increase power; use prior studies, meta‑analyses, or pilot estimates to anchor plausibility. Consider duration: shorter interventions tend to yield smaller absolute slowing. If you have a standardized target (paired d), multiply by SD(pair‑diff) to back out the absolute effect here."
     ),
-    "eff_abs_grimage": (
-        "Absolute reduction in GrimAge in years (beneficial). For example, 2.0 means the treated twin is 2 biological‑years younger at follow‑up. Anchor choices to clinically meaningful thresholds and the expected timescale of change—large year‑level shifts usually require longer follow‑up. When contamination is non‑zero, remember that the observed effect is diluted relative to the true biological effect."
-    ),
+    # (GrimAge-specific helper removed from UI)
     "eff_abs_custom": (
         "Absolute beneficial effect on your chosen change scale. Internally the treated change is reduced by this amount, so paired differences are negative; we report magnitudes positively for clarity. Set to 0 to sanity‑check that power ≈ alpha. If you have a standardized effect size (d), convert by multiplying d × SD(pair‑diff) where SD(pair‑diff)=sqrt(2·(1−ICC_eff))·SD(change)."
     ),
@@ -233,20 +234,17 @@ def panel_bioage():
     seed = st.number_input("Random seed", 0, 10**9, 12345, 1, help=HELP_BIO["seed"]) 
 
     st.subheader("Endpoint and effect")
-    endpoint = st.selectbox("Endpoint", ["dunedinpace", "grimage", "custom"], index=0, help=HELP_BIO["endpoint"]) 
+    endpoint = st.selectbox("Endpoint", ["dunedinpace", "custom"], index=0, help=HELP_BIO["endpoint"]) 
     if endpoint == "dunedinpace":
         eff_abs = st.number_input("Absolute slowing (e.g., 0.03 for 3%)", 0.0, 1.0, 0.03, 0.005, format="%.3f", help=HELP_BIO["eff_abs_dpace"]) 
         sd_change = st.number_input("SD of change", 1e-6, 1.0, 0.10, 0.01, format="%.3f", help=HELP_BIO["sd_change"]) 
-    elif endpoint == "grimage":
-        eff_abs = st.number_input("Years reduction (absolute)", 0.0, 20.0, 0.75, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
-        sd_change = st.number_input("SD of change (years)", 0.0, 20.0, 3.0, 0.1, help=HELP_BIO["sd_change"]) 
     else:
         eff_abs = st.number_input("Effect (absolute, beneficial)", 0.0, 100.0, 1.0, 0.1, help=HELP_BIO["eff_abs_custom"]) 
         sd_change = st.number_input("SD of change", 0.0, 100.0, 1.0, 0.1, help=HELP_BIO["sd_change"]) 
 
     st.subheader("ICC and zygosity mix")
-    icc_mz = st.number_input("ICC (MZ)", 0.0, 0.99, 0.55, 0.05, format="%.2f", help=HELP_BIO["icc_mz"]) 
-    icc_dz = st.number_input("ICC (DZ)", 0.0, 0.99, 0.55, 0.05, format="%.2f", help=HELP_BIO["icc_dz"]) 
+    icc_mz = st.number_input("ICC (MZ)", 0.0, 0.99, 0.60, 0.05, format="%.2f", help=HELP_BIO["icc_mz"]) 
+    icc_dz = st.number_input("ICC (DZ)", 0.0, 0.99, 0.40, 0.05, format="%.2f", help=HELP_BIO["icc_dz"]) 
     prop_mz = st.number_input("Proportion MZ", 0.0, 1.0, 0.5, 0.05, format="%.2f", help=HELP_BIO["prop_mz"]) 
 
     with st.expander("Compute SD(change) from pre/post SDs and correlation (optional)"):
@@ -267,7 +265,19 @@ def panel_bioage():
     attrition = st.number_input("Attrition rate", 0.0, 0.95, 0.25, 0.05, format="%.2f", help=HELP_BIO["attrition"]) 
 
     st.subheader("Goal")
-    goal = st.radio("Choose", ["Estimate power (fixed pairs)", "Find pairs for target power", "Find MDE", "Co-primary joint power"], index=0, help=HELP_BIO["goal"]) 
+    goal = st.radio(
+        "Choose",
+        [
+            "Estimate power (fixed pairs)",
+            "Find pairs for target power",
+            "Find MDE",
+            "Co-primary joint power",
+            "Two-sample power (individual-level, secondary)",
+            "Two-sample N for target power (secondary)",
+        ],
+        index=0,
+        help=HELP_BIO["goal"],
+    ) 
 
     if goal == "Estimate power (fixed pairs)":
         n_pairs = st.number_input("Completing pairs", 2, 100000, 700, 10, help=HELP_BIO["n_pairs"]) 
@@ -279,11 +289,18 @@ def panel_bioage():
             )
             icc_eff = spec.effective_icc()
             eff_obs = spec.observed_effect()
-            m1, m2 = st.columns(2)
+            m1, m2, m3 = st.columns(3)
             with m1:
                 st.metric("Effective ICC", f"{icc_eff:.3f}")
             with m2:
                 st.metric("Observed effect (diluted)", f"{eff_obs:.4f}")
+            with m3:
+                # Relative efficiency and effective independent N
+                from biological_age.power_twin_age import relative_efficiency as _re
+                re = _re(icc_eff)
+                deff = 1.0 + icc_eff
+                n_eff = int((int(n_pairs) * 2) / max(1e-12, deff))
+                st.metric("Relative efficiency (RE)", f"{re:.2f}×")
             if use_sim:
                 with st.spinner("Running simulation…"):
                     pw, avg_mag, se_pw = _simulate_pairs(spec, sims=int(sims))
@@ -305,6 +322,7 @@ def panel_bioage():
                 f"- Contamination: rate `{float(contam_rate):.2f}`, frac `{float(contam_frac):.2f}`\n"
                 f"- Attrition: `{float(attrition):.2f}`\n"
                 f"- Alpha: `{float(alpha):.3f}`; Simulation: `{bool(use_sim)}` (sims={int(sims)})\n"
+                f"- Relative efficiency (RE): `{re:.2f}×`; Effective independent N (DEFF=1+ICC): `{n_eff}`\n"
             )
             _download_button(
                 "Download scenario (JSON)",
@@ -331,6 +349,10 @@ def panel_bioage():
                         "power_ci": _power_ci(pw, se_pw) if use_sim else None,
                         "effective_icc": float(icc_eff),
                         "observed_effect": float(eff_obs),
+                        "relative_efficiency": float(re),
+                        "effective_independent_N": int(n_eff),
+                        "design_effect": float(deff),
+                        "sd_pair_diff": float((2.0 * max(0.0, 1.0 - float(icc_eff)) * (float(sd_change) ** 2)) ** 0.5),
                     },
                 },
                 key="bio_fixed_power",
@@ -382,6 +404,12 @@ def panel_bioage():
             else:
                 best_n, best_pw = analytic_pairs_for_power(float(target_power), float(eff_obs), float(sd_change), float(icc_eff), float(alpha))
             st.metric("Required pairs (approx)", f"{best_n}")
+            # Efficiency summary at N*
+            from biological_age.power_twin_age import relative_efficiency as _re
+            re = _re(icc_eff)
+            deff = 1.0 + icc_eff
+            n_eff = int((int(best_n) * 2) / max(1e-12, deff))
+            st.caption(f"Efficiency: RE={re:.2f}×; Effective independent N≈{n_eff}")
             st.write(f"Achieved power at N*: {best_pw:.3f}")
             if use_sim:
                 se = _approx_se(best_pw, max(500, int(sims)//2))
@@ -412,16 +440,16 @@ def panel_bioage():
             else:
                 st.write(f"MDE (beneficial abs): {mde:.4f}")
 
-    else:  # Co-primary
-        st.info("Alpha per endpoint defaults to 0.025 if global alpha=0.05.")
-        alpha_co = 0.025 if abs(alpha - 0.05) < 1e-9 else alpha
+    elif goal == "Co-primary joint power":
+        st.info("Alpha per endpoint defaults to 0.025 if global alpha≈0.05.")
+        alpha_co = 0.025 if abs(alpha - 0.05) < 1e-6 else alpha
         colA, colB = st.columns(2)
         with colA:
             dpace_eff = st.number_input("DunedinPACE slowing (abs)", 0.0, 1.0, 0.03, 0.005, format="%.3f", help=HELP_BIO["eff_abs_dpace"]) 
             dpace_sd = st.number_input("DunedinPACE SD(change)", 0.0, 1.0, 0.10, 0.01, format="%.3f", help=HELP_BIO["sd_change"]) 
         with colB:
-            grim_eff = st.number_input("GrimAge years reduction", 0.0, 20.0, 0.75, 0.1, help=HELP_BIO["eff_abs_grimage"]) 
-            grim_sd = st.number_input("GrimAge SD(change)", 0.0, 20.0, 3.0, 0.1, help=HELP_BIO["sd_change"]) 
+            grim_eff = st.number_input("Secondary endpoint effect (abs)", 0.0, 20.0, 0.75, 0.1) 
+            grim_sd = st.number_input("Secondary endpoint SD(change)", 0.0, 20.0, 3.0, 0.1) 
         pair_corr = st.slider("Pair-effect correlation across endpoints", 0.0, 1.0, 0.8, 0.05, help=HELP_BIO["pair_corr"]) 
         n_pairs_co = st.number_input("Completing pairs (co-primary)", 2, 100000, 700, 10, help=HELP_BIO["n_pairs_co"]) 
         sims_co = st.number_input("Simulations (co-primary)", 500, 20000, int(sims), 500, help=HELP_BIO["sims_co"]) 
@@ -441,7 +469,7 @@ def panel_bioage():
                     spec1, spec2, sims=int(sims_co), alpha=float(alpha_co), pair_effect_corr=float(pair_corr)
                 )
             st.metric("Joint power (both significant)", f"{pw_joint:.3f}")
-            st.write(f"Marginal — DunedinPACE: {pw1:.3f}; GrimAge: {pw2:.3f}")
+            st.write(f"Marginal — DunedinPACE: {pw1:.3f}; Secondary: {pw2:.3f}")
             # CI approximations
             se_joint = _approx_se(pw_joint, int(sims_co))
             lo_j, hi_j = _power_ci(pw_joint, se_joint)
@@ -455,8 +483,8 @@ def panel_bioage():
                         "n_pairs": int(n_pairs_co),
                         "dpace_effect": float(dpace_eff),
                         "dpace_sd": float(dpace_sd),
-                        "grim_effect": float(grim_eff),
-                        "grim_sd": float(grim_sd),
+                        "secondary_effect": float(grim_eff),
+                        "secondary_sd": float(grim_sd),
                         "pair_corr": float(pair_corr),
                         "icc_mz": float(icc_mz),
                         "icc_dz": float(icc_dz),
@@ -471,13 +499,152 @@ def panel_bioage():
                         "power_joint": float(pw_joint),
                         "power_joint_ci": (lo_j, hi_j),
                         "power_dpace": float(pw1),
-                        "power_grimage": float(pw2),
+                        "power_secondary": float(pw2),
                     },
                 },
                 key="bio_coprimary",
             )
             st.query_params["study"] = "bio"
             st.query_params["use_sim"] = "1"
+
+    elif goal == "Two-sample power (individual-level, secondary)":
+        n_pg = st.number_input("n per group", 2, 100000, 150, 2)
+        ancova_r2 = st.number_input("ANCOVA baseline R² (optional)", 0.0, 0.99, 0.50, 0.05, format="%.2f")
+        deff_icc = st.number_input("Design effect ICC (optional)", 0.0, 0.99, 0.50, 0.05, format="%.2f")
+        deff_m = st.number_input("Cluster size m (for DEFF)", 1, 10, 2, 1)
+        if st.button("Estimate two-sample power", type="primary"):
+            sd_ts = sd_change * (1.0 - ancova_r2) ** 0.5 if 0.0 <= ancova_r2 < 1.0 else sd_change
+            eff_obs = float(eff_abs) * (1.0 - float(contam_rate) * float(contam_frac))
+            pw = analytic_power_two_sample(int(n_pg), float(eff_obs), float(sd_ts), float(alpha))
+            st.metric("Two-sample power", f"{pw:.3f}")
+            n_total = 2 * int(n_pg)
+            try:
+                deff = design_effect(float(deff_icc), int(deff_m)) if deff_icc > 0 else None
+            except Exception:
+                deff = None
+            if deff is not None:
+                n_infl = int(math.ceil(n_total * deff))
+                st.caption(f"With DEFF={deff:.3f}, inflated total N={n_infl}")
+            if attrition > 0:
+                n_enroll = math.ceil(n_total / (1.0 - float(attrition)))
+                st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} individuals")
+
+    else:  # Two-sample N for target power (secondary)
+        target_power = st.number_input("Target power", 0.60, 0.995, 0.80, 0.01, format="%.2f") 
+        ancova_r2 = st.number_input("ANCOVA baseline R² (optional)", 0.0, 0.99, 0.50, 0.05, format="%.2f", key="ts_r2")
+        deff_icc = st.number_input("Design effect ICC (optional)", 0.0, 0.99, 0.50, 0.05, format="%.2f", key="ts_icc")
+        deff_m = st.number_input("Cluster size m (for DEFF)", 1, 10, 2, 1, key="ts_m")
+        if st.button("Find n per group", type="primary"):
+            sd_ts = sd_change * (1.0 - ancova_r2) ** 0.5 if 0.0 <= ancova_r2 < 1.0 else sd_change
+            eff_obs = float(eff_abs) * (1.0 - float(contam_rate) * float(contam_frac))
+            n_pg = analytic_n_per_group_for_power(float(target_power), float(eff_obs), float(sd_ts), float(alpha))
+            n_total = 2 * int(n_pg)
+            st.metric("Required n per group", f"{n_pg}")
+            try:
+                deff = design_effect(float(deff_icc), int(deff_m)) if deff_icc > 0 else None
+            except Exception:
+                deff = None
+            if deff is not None:
+                n_infl = int(math.ceil(n_total * deff))
+                st.caption(f"With DEFF={deff:.3f}, inflated total N={n_infl}")
+            if attrition > 0:
+                n_enroll = math.ceil(n_total / (1.0 - float(attrition)))
+                st.info(f"Enrollment with attrition {attrition:.1%}: ~{n_enroll} individuals")
+
+    st.divider()
+    st.subheader("Study preset (LLM multi-domain twin RCT)")
+    st.caption("Quick grid: 2–3% DunedinPACE slowing across 150/165/185 completing pairs with enrollment inflation.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        eff_grid = st.text_input("Effect % grid", value="2,2.5,3", key="study_eff_grid")
+    with c2:
+        n_grid = st.text_input("Completing pairs grid", value="150,165,185", key="study_n_grid")
+    with c3:
+        attr_grid = st.text_input("Attrition range", value="0.25,0.30", key="study_attr_grid")
+    if st.button("Run study summary", key="study_run"):
+        try:
+            eff_vals = [float(x.strip()) for x in eff_grid.split(',') if x.strip()]
+            n_vals = [int(float(x.strip())) for x in n_grid.split(',') if x.strip()]
+            ar = [float(x.strip()) for x in attr_grid.split(',') if x.strip()]
+            assert len(eff_vals) > 0 and len(n_vals) > 0 and len(ar) >= 2
+        except Exception:
+            st.error("Please provide valid CSVs for effects, N, and attrition (e.g., 2,2.5,3 | 150,165,185 | 0.25,0.30)")
+        else:
+            # Effective ICC for current design controls
+            icc_eff = 1.0 - (float(prop_mz) * (1.0 - float(icc_mz)) + (1.0 - float(prop_mz)) * (1.0 - float(icc_dz)))
+            icc_eff = max(0.0, min(0.999999, icc_eff))
+            import pandas as pd
+            rows = []
+            for n in n_vals:
+                row = {"n_pairs": int(n)}
+                for ep in eff_vals:
+                    eff_abs = float(ep) / 100.0
+                    # Apply contamination for observed effect
+                    eff_obs = eff_abs * (1.0 - float(contam_rate) * float(contam_frac))
+                    if use_sim:
+                        spec = AgeTwinSpec(
+                            n_pairs=int(n), effect_abs=eff_obs, sd_change=float(sd_change),
+                            prop_mz=float(prop_mz), icc_mz=float(icc_mz), icc_dz=float(icc_dz), alpha=float(alpha), seed=int(seed),
+                            contamination_rate=0.0, contamination_effect=0.0,
+                        )
+                        pw, _, _ = _simulate_pairs(spec, sims=int(sims))
+                    else:
+                        pw = analytic_power_paired(int(n), float(eff_obs), float(sd_change), float(icc_eff), float(alpha))
+                    row[f"{ep:.2f}%".rstrip('0').rstrip('.')] = round(float(pw), 3)
+                rows.append(row)
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True)
+            lo_ar = max(0.0, min(0.99, float(ar[0])))
+            hi_ar = max(0.0, min(0.99, float(ar[-1])))
+            st.subheader("Enrollment")
+            for n in n_vals:
+                el = math.ceil(int(n) / (1.0 - lo_ar))
+                eh = math.ceil(int(n) / (1.0 - hi_ar))
+                st.write(f"Completing {int(n)} → Enroll {el}–{eh} pairs ({2*el}–{2*eh} individuals)")
+
+    st.subheader("Sensitivity grid (Δ × ρ)")
+    st.caption("Quick sensitivity across within-pair effect Δ and twin correlation ρ. Uses analytic paired t-test.")
+    grid_mode = st.radio("Grid mode", ["Pairs for target power", "Power for fixed pairs"], index=0, horizontal=True)
+    colg1, colg2, colg3, colg4 = st.columns(4)
+    with colg1:
+        deltas_csv = st.text_input("Δ values (abs)", value="0.020,0.025,0.030")
+    with colg2:
+        rhos_csv = st.text_input("ρ values (ICC)", value="0.40,0.50,0.60")
+    with colg3:
+        apply_contam = st.checkbox("Apply contamination to Δ", value=True)
+    if grid_mode == "Pairs for target power":
+        with colg4:
+            target_power = st.number_input("Target power", 0.50, 0.999, 0.80, 0.01, format="%.2f")
+    else:
+        with colg4:
+            n_pairs_grid = st.number_input("Completing pairs", 2, 100000, 150, 10)
+    if st.button("Compute sensitivity grid", key="bio_sens_grid"):
+        try:
+            deltas = [float(x.strip()) for x in deltas_csv.split(',') if x.strip()]
+            rhos = [float(x.strip()) for x in rhos_csv.split(',') if x.strip()]
+            assert deltas and rhos
+        except Exception:
+            st.error("Provide valid CSVs for Δ and ρ, e.g., 0.020,0.025,0.030 and 0.40,0.50,0.60")
+        else:
+            import pandas as pd
+            rows = []
+            for dlt in deltas:
+                row = {"Δ": dlt}
+                for rho in rhos:
+                    eff = float(dlt)
+                    if apply_contam:
+                        eff *= (1.0 - float(contam_rate) * float(contam_frac))
+                    if grid_mode == "Pairs for target power":
+                        n_req, _ = analytic_pairs_for_power(float(target_power), float(eff), float(sd_change), float(rho), float(alpha))
+                        row[f"ρ={rho:.2f}"] = int(n_req)
+                    else:
+                        pw = analytic_power_paired(int(n_pairs_grid), float(eff), float(sd_change), float(rho), float(alpha))
+                        row[f"ρ={rho:.2f}"] = round(float(pw), 3)
+                rows.append(row)
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True)
+            if grid_mode == "Pairs for target power" and attrition > 0:
+                st.caption(f"Enrollment inflation with attrition {attrition:.1%}: enroll N_pairs / (1-attrition)")
 
 
 def panel_sleep():

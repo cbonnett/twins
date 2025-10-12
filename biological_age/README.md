@@ -29,6 +29,10 @@ Run the script either from this folder (`python power_twin_age.py`) or from the 
 - `mde` – minimal detectable effect at a target power.
 - `curve` – emit a CSV power curve over a range of pair counts.
 - `co-primary-power` – joint power for two endpoints with optional Monte Carlo simulation.
+- `study` – preset summary for the LLM multi-domain twin RCT (DunedinPACE primary) with a small grid over
+  effect sizes and completing pairs, plus enrollment inflation for an attrition range.
+- `two-sample-power` – individual-level (parallel groups) power on change scores with optional ANCOVA variance reduction.
+- `two-sample-n-for-power` – individual-level n per group for target power; optional design-effect (DEFF) reporting.
 
 Example invocations:
 
@@ -46,6 +50,28 @@ python biological_age/power_twin_age.py --mode pairs-for-power --target-power 0.
 python biological_age/power_twin_age.py --mode co-primary-power --n-pairs 700 --endpoint dunedinpace \
     --effect-pct 3 --sd-change 0.10 --endpoint2 grimage --effect2-years 2.0 --sd2-change 3.0 \
     --pair-effect-corr 0.8 --use-simulation --sims 5000
+
+# Study preset: LLM multi-domain twin RCT (DunedinPACE primary)
+# Quick summary across 2–3% slowing and 150/165/185 completing pairs, with 25–30% attrition range
+python biological_age/power_twin_age.py --mode study --study-preset twins-llm \
+    --use-simulation --sims 3000 \
+    --contamination-rate 0.10 --contamination-effect 0.30
+
+# Override defaults (e.g., different grids, ICCs)
+python biological_age/power_twin_age.py --mode study --study-preset twins-llm \
+    --study-effect-pct "2,2.5,3.0,3.5" --study-n-pairs "150,165,185,200" \
+    --icc-mz 0.60 --icc-dz 0.50 --prop-mz 0.5
+
+# Individual-level (two-sample) power – DunedinPACE primary
+# Power at fixed N using ANCOVA variance reduction (R^2=0.50)
+python biological_age/power_twin_age.py --mode two-sample-power \
+    --n-per-group 150 --endpoint dunedinpace --effect-pct 2.5 --sd-change 0.10 \
+    --ancova-r2 0.50 --alpha 0.05 --attrition-rate 0.27 --deff-icc 0.50 --deff-m 2
+
+# n per group for 80% power (ANCOVA R^2=0.50)
+python biological_age/power_twin_age.py --mode two-sample-n-for-power \
+    --endpoint dunedinpace --effect-pct 2.5 --sd-change 0.10 --ancova-r2 0.50 \
+    --alpha 0.05 --target-power 0.80 --deff-icc 0.50 --deff-m 2 --attrition-rate 0.27
 ```
 
 Helpful flags:

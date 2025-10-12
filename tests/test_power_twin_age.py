@@ -13,6 +13,7 @@ These tests go beyond basic validation to check:
 import sys
 import os
 import math
+import argparse
 import numpy as np
 import pytest
 
@@ -323,25 +324,7 @@ class TestCrossValidation:
             f"Power {pw:.2f} for CALERIE-like parameters seems unrealistic"
         )
     
-    def test_fitzgerald_grimage_benchmark(self):
-        """Validate against Fitzgerald 2021 study.
-        
-        8-week intervention, n=43 treated vs 40 control, achieved 3.23 year
-        DNAmAge reduction (p=0.018).
-        """
-        # Fitzgerald-like parameters (rough approximation)
-        n_pairs = 40  # ~40 pairs for 80 individuals
-        effect = 3.0  # 3-year reduction
-        sd_change = 5.0  # Estimated from biological age SD
-        icc = 0.50
-        alpha = 0.05
-        
-        pw = pta.analytic_power_paired(n_pairs, effect, sd_change, icc, alpha)
-        
-        # They achieved significance (p=0.018), suggesting power >80%
-        assert pw > 0.60, (
-            f"Power {pw:.2f} too low for Fitzgerald parameters that achieved significance"
-        )
+    # Removed: GrimAge-specific benchmark test
     
     def test_typical_rct_power(self):
         """Standard RCT aims for 80% power with Cohen's d ≈ 0.5."""
@@ -495,6 +478,193 @@ class TestInvarianceProperties:
         assert abs(icc1 - icc2) < 1e-10, "Symmetry broken in effective ICC calculation"
 
 
+# ---------------- Additional consolidated tests from auxiliary files ----------------
+
+
+def _ns(**kwargs):
+    """Helper to build an argparse.Namespace for internal CLI resolvers."""
+    defaults = dict(
+        endpoint=None,
+        effect_abs=None,
+        effect_pct=None,
+        effect_years=None,
+        d_std=None,
+        sd_change=None,
+        sd_change2=None,
+        sd2_change=None,
+        sd_pre=None,
+        sd_post=None,
+        rho_pre_post=None,
+        icc_mz=0.55,
+        icc_dz=0.55,
+        prop_mz=0.5,
+    )
+    defaults.update(kwargs)
+    return argparse.Namespace(**defaults)
+
+
+class TestCliResolutionAndHelpers:
+    def test_endpoint_effect_pct_dunedinpace(self):
+        args = _ns(endpoint="dunedinpace", effect_pct=3.0, sd_change=0.10)
+        effect = pta._resolve_effect_abs(args, sd_change=0.10, icc_eff=0.55)
+        assert abs(effect - 0.03) < 1e-12
+
+    # Removed: GrimAge-specific effect_years resolution test
+
+    def test_d_std_resolution_matches_sd_diff(self):
+        sd_change = 0.10
+        icc_eff = 0.55
+        sd_d = pta.sd_diff_from_sd_change_icc(sd_change, icc_eff)
+        args = _ns(endpoint="custom", d_std=0.30, sd_change=sd_change)
+        resolved = pta._resolve_effect_abs(args, sd_change=sd_change, icc_eff=icc_eff)
+        assert abs(resolved - 0.30 * sd_d) < 1e-12
+
+    def test_sd_change_derivation_from_pre_post(self):
+        # If sd_pre=sd_post=1 and rho=0.5 -> sd_change=1
+        args = _ns(sd_pre=1.0, sd_post=1.0, rho_pre_post=0.5)
+        sd_change = pta._resolve_sd_change(args)
+        assert abs(sd_change - 1.0) < 1e-12
+
+    def test_coprimary_naming_variants_effect_and_sd(self):
+        args_a = _ns(endpoint2="custom", effect2_abs=2.0, sd_change2=3.0)
+        args_b = _ns(endpoint2="custom", effect_abs2=2.0, sd2_change=3.0)
+        icc_eff = 0.55
+        e_a = pta._resolve_effect_abs(args_a, sd_change=3.0, icc_eff=icc_eff, suffix="2")
+        e_b = pta._resolve_effect_abs(args_b, sd_change=3.0, icc_eff=icc_eff, suffix="2")
+        assert abs(e_a - 2.0) < 1e-12 and abs(e_b - 2.0) < 1e-12
+        sd_a = pta._resolve_sd_change(args_a, suffix="2")
+        sd_b = pta._resolve_sd_change(args_b, suffix="2")
+        assert abs(sd_a - 3.0) < 1e-12 and abs(sd_b - 3.0) < 1e-12
+
+
+class TestDegenerateAndFallback:
+    def test_degenerate_p_values_zero_and_constant(self):
+        import numpy as np
+
+        d0 = np.zeros(50)
+        p0 = pta._compute_paired_pval(d0)
+        assert p0 == 1.0
+
+        d1 = np.full(50, 0.1)
+        p1 = pta._compute_paired_pval(d1)
+        assert p1 == 0.0
+
+    def test_analytic_normal_fallback_matches_normal_formula(self):
+        n_pairs = 1000
+        sd_change = 0.10
+        icc_eff = 0.55
+        effect_abs = 1.0
+        d = pta.d_paired(effect_abs, sd_change, icc_eff)
+        lam = math.sqrt(n_pairs) * d
+        assert lam > 20.0
+        alpha = 0.05
+        pw = pta.analytic_power_paired(n_pairs, effect_abs, sd_change, icc_eff, alpha)
+        pw_norm = pta._two_sided_power_normal(lam, alpha)
+        assert abs(pw - pw_norm) < 1e-10
+
+    def test_attrition_inflation_rounds_up(self):
+        assert pta.inflate_for_attrition(185, 0.25) == 247
+
+
+class TestCoPrimaryBehavior:
+    def test_joint_power_increases_with_correlation_and_bounds_hold(self):
+        spec1 = pta.AgeTwinSpec(n_pairs=150, effect_abs=0.03, sd_change=0.10, seed=123)
+        spec2 = pta.AgeTwinSpec(n_pairs=150, effect_abs=0.75, sd_change=3.50, seed=124)
+        joint0, p1_0, p2_0 = pta._simulate_co_primary(spec1, spec2, sims=1000, alpha=0.05, pair_effect_corr=0.0)
+        joint9, p1_9, p2_9 = pta._simulate_co_primary(spec1, spec2, sims=1000, alpha=0.05, pair_effect_corr=0.9)
+        assert joint9 >= joint0 - 0.02
+        min_marg0 = min(p1_0, p2_0)
+        assert joint0 <= min_marg0 + 0.02
+        assert joint0 >= (p1_0 * p2_0) - 0.05
+
+
+class TestValidationAndMonotonicity:
+    def test_effective_icc_clamping_below_one(self):
+        spec = pta.AgeTwinSpec(n_pairs=10, effect_abs=0.01, sd_change=0.10, icc_mz=0.9999999, icc_dz=0.9999999, prop_mz=1.0)
+        icc_eff = spec.effective_icc()
+        assert icc_eff < 1.0 and icc_eff > 0.99
+
+    def test_sd_diff_numeric_value(self):
+        sd_d = pta.sd_diff_from_sd_change_icc(0.10, 0.55)
+        expected = math.sqrt(2.0 * (1.0 - 0.55) * (0.10 ** 2))
+        assert abs(sd_d - expected) < 1e-12
+
+    def test_contamination_extremes(self):
+        assert pta.apply_contamination(0.03, 0.0, 0.5) == 0.03
+        assert pta.apply_contamination(0.03, 0.2, 0.0) == 0.03
+        assert pta.apply_contamination(0.03, 1.0, 1.0) == 0.0
+
+    def test_validation_errors_on_bad_inputs(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            pta.AgeTwinSpec(n_pairs=10, effect_abs=0.0, sd_change=0.1)
+        with pytest.raises(ValueError):
+            pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=0.0)
+        with pytest.raises(ValueError):
+            pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=0.1, alpha=1.0)
+        with pytest.raises(ValueError):
+            pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=0.1, icc_mz=1.0)
+        with pytest.raises(ValueError):
+            pta.AgeTwinSpec(n_pairs=10, effect_abs=0.1, sd_change=0.1, contamination_rate=1.1)
+
+    def test_mde_monotonicity_and_alpha_power_relations(self):
+        sd_change = 0.10
+        icc = 0.55
+        alpha5 = 0.05
+        mde_100 = pta.analytic_mde(100, 0.80, sd_change, icc, alpha5)
+        mde_200 = pta.analytic_mde(200, 0.80, sd_change, icc, alpha5)
+        assert mde_200 < mde_100
+        mde_icc_low = pta.analytic_mde(150, 0.80, sd_change, 0.40, alpha5)
+        mde_icc_high = pta.analytic_mde(150, 0.80, sd_change, 0.70, alpha5)
+        assert mde_icc_high < mde_icc_low
+        mde_p90 = pta.analytic_mde(150, 0.90, sd_change, icc, alpha5)
+        mde_p80 = pta.analytic_mde(150, 0.80, sd_change, icc, alpha5)
+        assert mde_p90 > mde_p80
+        mde_a01 = pta.analytic_mde(150, 0.80, sd_change, icc, 0.01)
+        assert mde_a01 > mde_p80
+
+    def test_simulation_seed_determinism(self):
+        spec = pta.AgeTwinSpec(n_pairs=120, effect_abs=0.03, sd_change=0.10, seed=4242)
+        pw1, avg1, _ = pta._simulate_pairs(spec, sims=1000)
+        pw2, avg2, _ = pta._simulate_pairs(spec, sims=1000)
+        assert pw1 == pw2
+        assert abs(avg1 - avg2) == 0.0
+
+    def test_power_decreases_with_more_contamination(self):
+        # Baseline
+        pw0 = pta.analytic_power_paired(200, 0.03, 0.10, 0.55, 0.05)
+        # 10% reduction via contamination
+        eff10 = pta.apply_contamination(0.03, 0.2, 0.5)
+        pw10 = pta.analytic_power_paired(200, eff10, 0.10, 0.55, 0.05)
+        # 20% reduction via stronger contamination
+        eff20 = pta.apply_contamination(0.03, 0.4, 0.5)
+        pw20 = pta.analytic_power_paired(200, eff20, 0.10, 0.55, 0.05)
+        assert pw10 < pw0 and pw20 < pw10
+
+    def test_required_pairs_increase_with_contamination(self):
+        target = 0.95
+        icc = 0.55
+        sd = 0.10
+        # No contamination
+        n0, _ = pta.analytic_pairs_for_power(target, 0.03, sd, icc, 0.05)
+        # 10% reduction
+        e10 = pta.apply_contamination(0.03, 0.2, 0.5)
+        n10, _ = pta.analytic_pairs_for_power(target, e10, sd, icc, 0.05)
+        assert n10 > n0
+
+
+class TestTwinEfficiency:
+    def test_relative_efficiency_values(self):
+        # RE = 1 / [2(1-ICC)]
+        assert abs(pta.relative_efficiency(0.50) - 1.0) < 1e-9
+        assert abs(pta.relative_efficiency(0.60) - 1.25) < 1e-9
+        assert abs(pta.relative_efficiency(0.70) - (1.0 / (2.0 * 0.30))) < 1e-9
+        # Below 0.5, efficiency drops below parity
+        re_40 = pta.relative_efficiency(0.40)
+        assert 0.80 < re_40 < 0.85
+
+
 def run_advanced_tests():
     """Run all advanced tests."""
     print("\n" + "=" * 70)
@@ -525,4 +695,3 @@ def run_advanced_tests():
 if __name__ == "__main__":
     exit_code = run_advanced_tests()
     sys.exit(exit_code)
-

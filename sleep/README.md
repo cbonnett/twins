@@ -8,7 +8,6 @@ Within-pair correlation is explicitly modeled, enabling realistic power and samp
 ## Contents
 
 - `power_twin_sleep.py` — Monte Carlo engine + CLI
-- `raw_sleep_design.md` — design notes
 - `README.md` — this documentation
 
 The unified Streamlit UI lives at the repository root (`streamlit_app.py`) and includes a Sleep (ISI) panel.

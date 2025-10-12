@@ -99,7 +99,7 @@ Typical invocations:
 
 ```bash
 python biological_age/power_twin_age.py --mode power --n-pairs 700 --endpoint dunedinpace --effect-pct 3 --sd-change 0.10 --icc-mz 0.55 --icc-dz 0.55 --prop-mz 0.5
-python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --sims 2000
+python sleep/power_twin_sleep.py --mode power --n-total 220 --effect-points 6 --sd-change 7 --prop-twins 0.9 --prop-mz 0.5 --icc-mz 0.5 --icc-dz 0.25 --sims 2000 --n-jobs -1
  
 # Co‑primary biological age example
 python biological_age/power_twin_age.py --mode co-primary-power --n-pairs 700 \
@@ -122,6 +122,7 @@ PYTHONPATH=. pytest -q
 Suites included:
 - `tests/test_power_twin_age.py` — validation helpers, analytic formulas, simulation stability, CLI behavior (biological age).
 - `tests/test_sleep_study.py` — protocol-oriented checks and simulation behavior (sleep/ISI).
+- `tests/test_power_twin_sleep_parallel.py` — regression suite for multiprocessing determinism and parallel `find_n_for_power`.
 
 `PYTHONPATH=.` ensures the subpackages are importable when running from the root.
 

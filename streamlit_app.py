@@ -35,6 +35,8 @@ from sleep.power_twin_sleep import (
     sd_change_from_pre_post as sleep_sd_change_from_pre_post,
 )
 
+# (Lifestyle module available separately; not wired into the app UI)
+
 
 st.set_page_config(page_title="Twin Power — Unified", layout="wide")
 st.title("Twin-Aware Power — Unified App")
@@ -150,6 +152,12 @@ HELP_SLEEP = {
     ),
     "seed": (
         "Random seed for reproducibility. Keeps simulated power results stable across runs for the same inputs. Record the seed alongside assumptions in analysis plans to facilitate independent replication and auditing of your power calculations."
+    ),
+    "n_jobs": (
+        "Number of worker processes for Monte Carlo simulation. Set to 1 for deterministic single-core runs; use -1 to leverage all available cores (the app falls back to threads automatically if the environment blocks multiprocessing). Increasing workers shortens runtime for large `sims`, but be mindful of laptop thermals and concurrent workloads."
+    ),
+    "chunk_size": (
+        "Simulations per task handed to each worker. Larger chunks reduce scheduling overhead for massive `sims`; smaller chunks provide finer-grained load balancing on heterogeneous hardware. Defaults to 64—tune upward (e.g., 256) for high-core servers, or downward (e.g., 16) when interactive responsiveness matters."
     ),
     "effect_points": (
         "Treatment–control difference in ISI change at Week 8, in points (beneficial = larger additional reduction for treatment). A commonly cited minimal clinically important difference (MCID) is ≈6 points—use this as a reference when selecting a plausible effect. Align your assumed effect with intervention intensity, adherence expectations, and follow‑up length; shorter or lower‑touch interventions often yield smaller point changes."
@@ -474,13 +482,17 @@ def panel_bioage():
 
 def panel_sleep():
     st.header("Sleep — ISI Change (Individually Randomized RCT with Twins)")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         alpha = st.number_input("Alpha (two-sided)", min_value=0.0001, max_value=0.2, value=0.05, step=0.005, format="%.3f", help=HELP_SLEEP["alpha"]) 
     with c2:
         sims = st.number_input("Monte Carlo simulations", min_value=200, max_value=20000, value=2000, step=200, help=HELP_SLEEP["sims"]) 
     with c3:
         seed = st.number_input("Random seed", min_value=0, max_value=10**9, value=12345, step=1, help=HELP_SLEEP["seed"]) 
+    with c4:
+        n_jobs = st.number_input("Worker processes", min_value=-1, max_value=64, value=1, step=1, help=HELP_SLEEP["n_jobs"], format="%d") 
+    with c5:
+        chunk_size = st.number_input("Chunk size", min_value=1, max_value=2048, value=64, step=16, help=HELP_SLEEP["chunk_size"], format="%d") 
 
     st.subheader("Effect and variability")
     col1, col2 = st.columns(2)
@@ -534,7 +546,12 @@ def panel_sleep():
                 contamination_rate=float(contamination_rate), contamination_effect=float(contamination_effect), attrition_rate=float(attrition)
             )
             with st.spinner("Running simulation…"):
-                pw, avg_est = simulate_power(spec, sims=int(sims))
+                pw, avg_est = simulate_power(
+                    spec,
+                    sims=int(sims),
+                    n_jobs=int(n_jobs),
+                    chunk_size=int(chunk_size),
+                )
             st.metric("Estimated power", f"{pw:.3f}")
             se_pw = _approx_se(pw, int(sims))
             lo, hi = _power_ci(pw, se_pw)
@@ -548,6 +565,7 @@ def panel_sleep():
                 f"- ICC MZ/DZ: `{float(icc_mz):.2f}` / `{float(icc_dz):.2f}`\n"
                 f"- Contamination: rate `{float(contamination_rate):.2f}`, frac `{float(contamination_effect):.2f}`\n"
                 f"- Attrition: `{float(attrition):.2f}`; Alpha: `{float(alpha):.3f}`; Sims: `{int(sims)}`\n"
+                f"- Parallelism: workers `{int(n_jobs)}`, chunk size `{int(chunk_size)}`\n"
             )
             _download_button(
                 "Download scenario (JSON)",
@@ -567,6 +585,8 @@ def panel_sleep():
                         "alpha": float(alpha),
                         "seed": int(seed),
                         "sims": int(sims),
+                        "n_jobs": int(n_jobs),
+                        "chunk_size": int(chunk_size),
                     },
                     "results": {
                         "power": float(pw),
@@ -613,6 +633,8 @@ def panel_sleep():
                     sims=int(sims),
                     n_min=int(n_min),
                     n_max=int(n_max),
+                    n_jobs=int(n_jobs),
+                    chunk_size=int(chunk_size),
                 )
             st.metric("Required N (individuals)", f"{best_n}")
             st.write(f"Achieved power at N*: {best_pw:.3f}")
@@ -639,6 +661,8 @@ def panel_sleep():
                         "alpha": float(alpha),
                         "seed": int(seed),
                         "sims": int(sims),
+                        "n_jobs": int(n_jobs),
+                        "chunk_size": int(chunk_size),
                     },
                     "results": {
                         "n_required": int(best_n),

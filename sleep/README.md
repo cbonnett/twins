@@ -90,6 +90,8 @@ Helpful flags:
 
 - `--analysis {cluster_robust,mixedlm}` — choose estimator. MixedLM is optional and, if it fails to converge, the CLI falls back to cluster‑robust OLS.
 - `--seed` — reproducible Monte Carlo draws.
+- `--n-jobs` — parallel worker processes; use `-1` for all CPU cores. Combine with `--chunk-size` to tune workload per process.
+- `--chunk-size` — number of simulations per task when multiprocessing is enabled (default 64).
 - `--contamination-rate` / `--contamination-effect` — apply effect attenuation (`effect_obs = effect × (1 − rate × fraction)`).
 - `--attrition-rate` — compute inflated enrollment counts (power is always on completing participants).
 
@@ -109,6 +111,7 @@ Helpful flags:
 - Estimated power (fixed `N`) or required total sample size (`n-for-power`).
 - 95% Monte Carlo confidence interval for power.
 - Monte Carlo standard error, average estimated treatment effect, and Kish effective sample size.
+- Parallel simulation support with reproducible seeds across worker counts; speed-ups scale with available cores for large `--sims`.
 - Contamination-adjusted effect magnitude and attrition-inflated enrollment counts when those features are enabled.
 
 
@@ -143,6 +146,15 @@ Run from the repository root so subpackages are importable:
 
 ```bash
 PYTHONPATH=. pytest tests/test_sleep_study.py -q
+PYTHONPATH=. pytest tests/test_power_twin_sleep_parallel.py -q
 ```
 
 The suite focuses on SIESTA‑LLM protocol parameters and verifies simulation behavior, continuity, and robustness.
+
+
+## Parallel Execution Notes
+
+- The Monte Carlo engine uses `ProcessPoolExecutor` when `--n-jobs > 1`, and automatically falls back to thread-based execution if the host blocks process creation (common on managed CI or notebooks). Chunk seeds are generated deterministically from the top-level seed, so results are identical regardless of worker count.
+- Adjust `--chunk-size` to balance CPU utilisation and scheduling overhead. Larger chunks reduce coordination cost for very large `--sims`, while smaller chunks keep the workload evenly distributed across heterogeneous cores.
+- The parallel test (`tests/test_power_twin_sleep_parallel.py`) exercises serial vs parallel equivalence, deterministic chunking, and the `find_n_for_power` binary search when multiprocessing is enabled.
+- For exploratory runs stick to the default single process; switch to `--n-jobs -1` (or an explicit core count) for production sweeps where wall-clock time dominates.

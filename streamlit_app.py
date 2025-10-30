@@ -44,6 +44,10 @@ from sleep.power_twin_sleep import (
 st.set_page_config(page_title="Twin Power — Unified", layout="wide")
 st.title("Twin-Aware Power — Unified App")
 st.caption("Run power and sample-size calculations for Biological Age and Sleep studies in one place.")
+st.warning(
+    "This application is intended for educational and exploratory purposes only. "
+    "The analyses have not undergone expert statistical review."
+)
 
 
 def _power_ci(p: float, se: float) -> tuple[float, float]:
